@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# These self-contained Colab archives are each about 126 MB, exceeding
+# GitHub's 100 MB per-file limit. The unpacked source, data, docs, configs,
+# notebooks, and generated CSV outputs are tracked instead.
+constellation_colab_a100_bundle.zip
+constellation_colab_bundle.zip

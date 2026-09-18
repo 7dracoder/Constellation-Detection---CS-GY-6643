@@ -1,0 +1,27 @@
+{
+  "background_sigma": 10.0,
+  "response_sigma_small": 0.8,
+  "response_sigma_large": 2.2,
+  "response_percentile": 99.2,
+  "max_candidates": 15000,
+  "min_candidate_distance": 3,
+  "coarse_factor": 3,
+  "coarse_peaks_per_transform": 5,
+  "max_global_candidates": 120,
+  "candidate_refinement_limit": 120,
+  "variants_per_candidate": 2,
+  "fine_top_pairs": 8,
+  "intensity_weight": 0.45,
+  "angles": 18,
+  "scales": [
+    0.76,
+    0.86,
+    0.96,
+    1.0,
+    1.12,
+    1.28
+  ],
+  "refine_radius": 8,
+  "presence_threshold": 0.6661348277330399,
+  "margin_threshold": 0.0
+}
