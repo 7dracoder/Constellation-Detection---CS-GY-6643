@@ -27,6 +27,7 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
+from scipy.stats import binom
 
 from constellation_pipeline import (
     MatcherConfig,
@@ -43,12 +44,48 @@ from constellation_pipeline import (
 from structural_refiner import MembershipClassifier, Pattern, load_patterns, train_membership_classifier
 
 
+# Relative weights of the coverage and figure-count terms against the
+# significance term.  Selected on the three labelled training scenes.
+SCORE_COVERAGE_WEIGHT = 1.0
+SCORE_COUNT_WEIGHT = 1.0
+
+
 @dataclass(frozen=True)
 class Candidate:
     query_index: int
     x: int
     y: int
     score: float
+
+
+@dataclass(frozen=True)
+class FitContext:
+    """Per-scene quantities the size-fair pattern score needs.
+
+    ``cloud_size`` and ``image_area`` define the uniform null model used to
+    ask how surprising a support count is.  ``expected_figure`` is the
+    train-derived prior on how many query patches belong to the target
+    figure.  None of these depend on the scene identity or its patch count
+    being meaningful as a label.
+    """
+
+    cloud_size: int
+    image_area: float
+    expected_figure: float
+
+    @property
+    def minimum_support(self) -> int:
+        """Smallest support that counts as identification evidence.
+
+        A similarity transform has four degrees of freedom, so a four-node
+        diagram matching four of many candidate points is close to
+        unfalsifiable: RANSAC searches a large number of four-point subsets,
+        and the per-transform null probability does not charge for that
+        search.  Requiring a fit to explain at least half of the stars the
+        figure is expected to contribute removes those trivial wins without
+        hard-coding a node count.
+        """
+        return max(5, int(round(0.5 * self.expected_figure)))
 
 
 @dataclass(frozen=True)
@@ -60,6 +97,10 @@ class GraphFit:
     mean_error: float
     tolerance: float
     quality: float
+    matrix: Optional[np.ndarray] = None
+    offset: Optional[np.ndarray] = None
+    coverage: float = 0.0
+    significance: float = 0.0
 
 
 def candidate_pairs(candidates: list[Candidate]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -229,6 +270,7 @@ def assign_queries(
     matrix: np.ndarray,
     offset: np.ndarray,
     candidates: list[Candidate],
+    context: FitContext,
 ) -> Optional[GraphFit]:
     """Assign at most one query patch to each mapped pattern node and vice versa."""
     mapped = source_points @ matrix.T + offset
@@ -268,23 +310,23 @@ def assign_queries(
     # partial-graph fit without allowing arbitrary affine distortion.
     refined = estimate_similarity(source_points[np.asarray(node_indices)], np.asarray(target_points, np.float32))
     if refined is not None and len(node_indices) >= 3:
-        return assign_queries_once(pattern, source_points, *refined, candidates)
-    return graph_fit_from_assignment(pattern, mapped, assignments, tolerance)
+        return assign_queries_once(pattern, source_points, *refined, candidates, context)
+    return graph_fit_from_assignment(pattern, mapped, assignments, tolerance, context, matrix, offset)
 
 
-def assign_queries_once(
-    pattern: Pattern,
-    source_points: np.ndarray,
-    matrix: np.ndarray,
-    offset: np.ndarray,
-    candidates: list[Candidate],
-) -> Optional[GraphFit]:
-    """One non-recursive assignment pass used after least-squares refinement."""
-    mapped = source_points @ matrix.T + offset
+def assign_to_mapped(
+    mapped: np.ndarray, candidates: list[Candidate], tolerance: float
+) -> dict[int, Candidate]:
+    """One-to-one Hungarian assignment of query patches onto mapped nodes.
+
+    Split out of ``assign_queries_once`` so the same rule can be reapplied to a
+    denser candidate cloud once a transform has already been chosen from a
+    sparse, high-precision one.
+    """
     query_ids = sorted({item.query_index for item in candidates})
+    if not query_ids:
+        return {}
     query_to_column = {query: column for column, query in enumerate(query_ids)}
-    scale = float(np.sqrt(abs(np.linalg.det(matrix))))
-    tolerance = float(np.clip(4.5 * scale, 18.0, 45.0))
     costs = np.full((len(mapped), len(query_ids)), 1.25, dtype=np.float32)
     chosen = np.full((len(mapped), len(query_ids)), -1, dtype=np.int32)
     score_values = np.asarray([item.score for item in candidates], dtype=np.float32)
@@ -304,50 +346,140 @@ def assign_queries_once(
         if column < len(query_ids) and chosen[node, column] >= 0 and costs[node, column] < 0.92:
             candidate = candidates[int(chosen[node, column])]
             assignments[candidate.query_index] = candidate
-    return graph_fit_from_assignment(pattern, mapped, assignments, tolerance)
+    return assignments
+
+
+def assign_queries_once(
+    pattern: Pattern,
+    source_points: np.ndarray,
+    matrix: np.ndarray,
+    offset: np.ndarray,
+    candidates: list[Candidate],
+    context: FitContext,
+) -> Optional[GraphFit]:
+    """One non-recursive assignment pass used after least-squares refinement."""
+    mapped = source_points @ matrix.T + offset
+    scale = float(np.sqrt(abs(np.linalg.det(matrix))))
+    tolerance = float(np.clip(4.5 * scale, 18.0, 45.0))
+    assignments = assign_to_mapped(mapped, candidates, tolerance)
+    return graph_fit_from_assignment(pattern, mapped, assignments, tolerance, context, matrix, offset)
 
 
 def graph_fit_from_assignment(
-    pattern: Pattern, mapped: np.ndarray, assignments: dict[int, Candidate], tolerance: float
+    pattern: Pattern,
+    mapped: np.ndarray,
+    assignments: dict[int, Candidate],
+    tolerance: float,
+    context: FitContext,
+    matrix: Optional[np.ndarray] = None,
+    offset: Optional[np.ndarray] = None,
 ) -> Optional[GraphFit]:
+    """Rank a partial-graph fit in a way that does not reward node count.
+
+    The previous expression was ``support + 0.20 * coverage - error/tol`` with
+    ``coverage = support / min(len(pattern.points), support)``.  Support never
+    exceeds the node count, so that ``min`` always selected ``support`` and the
+    coverage term was identically 1.0: the ranking reduced to raw support.
+    Raw support favours large diagrams, because a free similarity transform
+    over a dense candidate cloud finds more coincidences the more nodes it has
+    to place.  Measured on this project's own output, every predicted label sat
+    among the largest supplied diagrams.
+
+    Three terms replace it:
+
+    * ``significance`` - how improbable this support is under a uniform-null
+      cloud of the same density.  A 27-node diagram must earn more support
+      than an 11-node diagram to reach the same score.
+    * ``coverage`` - the real fraction of the diagram's own nodes explained.
+    * ``count_penalty`` - the labelled scenes place the figure at roughly a
+      third of the present patches; a fit far from that is likelier to be a
+      coincidence than a constellation.
+    """
     if len(assignments) < 3:
         return None
     points = np.asarray([(item.x, item.y) for item in assignments.values()], dtype=np.float32)
     error = np.linalg.norm(points[:, None, :] - mapped[None, :, :], axis=2).min(axis=1)
     mean_error = float(error.mean())
     support = len(assignments)
-    # The dominant signal is a set of distinct queries explained by one graph.
-    # A small coverage term only resolves ties between patterns of different
-    # node counts; it does not assume the full figure was issued as patches.
-    coverage = support / min(len(pattern.points), support)
-    quality = float(support + 0.20 * coverage - mean_error / tolerance)
-    return GraphFit(pattern, mapped, assignments, support, mean_error, tolerance, quality)
+    nodes = len(pattern.points)
+
+    coverage = support / nodes
+    hit_probability = float(
+        np.clip(context.cloud_size * math.pi * tolerance * tolerance / context.image_area, 1e-9, 1.0 - 1e-9)
+    )
+    # -log10 P(Binomial(nodes, hit) >= support): a size-fair surprise measure.
+    significance = float(-binom.logsf(support - 1, nodes, hit_probability) / math.log(10.0))
+    if not math.isfinite(significance):
+        significance = 0.0
+    count_penalty = abs(support - context.expected_figure) / max(context.expected_figure, 1.0)
+
+    quality = float(
+        significance
+        + SCORE_COVERAGE_WEIGHT * coverage
+        - mean_error / tolerance
+        - SCORE_COUNT_WEIGHT * count_penalty
+    )
+    return GraphFit(
+        pattern,
+        mapped,
+        assignments,
+        support,
+        mean_error,
+        tolerance,
+        quality,
+        matrix,
+        offset,
+        coverage,
+        significance,
+    )
 
 
-def fit_pattern(pattern: Pattern, candidates: list[Candidate], proposals: int, seed: int) -> Optional[GraphFit]:
+def fit_pattern(
+    pattern: Pattern, candidates: list[Candidate], proposals: int, seed: int, context: FitContext
+) -> Optional[GraphFit]:
     """Fit both possible handednesses of a supplied reference pattern."""
     best: Optional[GraphFit] = None
     for reflected, source in enumerate((pattern.points, pattern.points * np.array((1.0, -1.0), np.float32))):
         matrices, offsets = propose_transforms(source, candidates, proposals, seed + 10_007 * reflected)
         for matrix, offset, _ in top_hypotheses(source, candidates, matrices, offsets):
-            fit = assign_queries(pattern, source, matrix, offset, candidates)
+            fit = assign_queries(pattern, source, matrix, offset, candidates, context)
             if fit is not None and (best is None or fit.quality > best.quality):
                 best = fit
     return best
 
 
-def _fit_pattern_task(args: tuple[Pattern, list[Candidate], int, int]) -> Optional[GraphFit]:
-    pattern, candidates, proposals, seed = args
-    return fit_pattern(pattern, candidates, proposals, seed)
+def _fit_pattern_task(args: tuple[Pattern, list[Candidate], int, int, FitContext]) -> Optional[GraphFit]:
+    pattern, candidates, proposals, seed, context = args
+    return fit_pattern(pattern, candidates, proposals, seed, context)
 
 
-def choose_fit(patterns: list[Pattern], candidates: list[Candidate], proposals: int, seed: int) -> tuple[Optional[GraphFit], Optional[GraphFit]]:
+def choose_fit(
+    patterns: list[Pattern],
+    candidates: list[Candidate],
+    proposals: int,
+    seed: int,
+    context: FitContext,
+) -> tuple[Optional[GraphFit], Optional[GraphFit]]:
     # This runs after the CUDA scene matcher has initialized.  Threads avoid
     # forking a process with a live CUDA context, which can deadlock in Colab.
     # NumPy/SciPy do the expensive numeric work outside Python's GIL.
-    tasks = [(pattern, candidates, proposals, seed + 101 * index) for index, pattern in enumerate(patterns)]
+    tasks = [
+        (pattern, candidates, proposals, seed + 101 * index, context)
+        for index, pattern in enumerate(patterns)
+    ]
     with ThreadPoolExecutor(max_workers=2) as executor:
-        fits = [fit for fit in executor.map(_fit_pattern_task, tasks) if fit is not None]
+        # Two points always define a similarity transform, so a three-node
+        # agreement is not identification evidence.  Such a fit previously
+        # could still win on quality and, because the caller requires
+        # support >= 4 to emit a name, silently force the scene to "unknown"
+        # while a genuine larger fit existed.
+        found = [fit for fit in executor.map(_fit_pattern_task, tasks) if fit is not None]
+    # Prefer fits that clear the expected-figure floor.  If none does, still
+    # return the best three-degrees-of-freedom-beating fit rather than nothing:
+    # the identity term is scored as accuracy, so declining to name a scene
+    # earns exactly what a wrong name earns, and a ranked guess can only help.
+    eligible = [fit for fit in found if fit.support >= context.minimum_support]
+    fits = eligible if eligible else [fit for fit in found if fit.support >= 4]
     fits.sort(key=lambda item: item.quality, reverse=True)
     return (fits[0], fits[1]) if len(fits) >= 2 else (fits[0] if fits else None, None)
 
@@ -418,6 +550,23 @@ def membership_probabilities(
     return np.asarray(values, dtype=np.float32)
 
 
+def presence_cutoff(scores: np.ndarray, mode: str, config: MatcherConfig, present_rate: float) -> float:
+    """Decide the per-scene present/absent cut.
+
+    A single global score threshold generalised badly here: the published
+    0.66890 run marked 72.8% of patches present overall, with six scenes above
+    90% and one at 100%, while the labelled scenes sit at 53-66%.  Matcher
+    scores drift between scenes, so a rank-based cut calibrated to the training
+    present-rate transfers better than one absolute number.  The threshold mode
+    is retained so the two can be compared directly.
+    """
+    if mode == "threshold":
+        return float(config.presence_threshold)
+    keep = max(1, int(round(present_rate * len(scores))))
+    ordered = np.sort(scores)[::-1]
+    return float(ordered[min(keep, len(ordered)) - 1])
+
+
 def predict_row(
     root: Path,
     split: str,
@@ -431,6 +580,13 @@ def predict_row(
     seed: int,
     device: str,
     batch_size: int,
+    graph_top_k: int,
+    presence_mode: str,
+    present_rate: float,
+    figure_rate: float,
+    graph_query_factor: float,
+    min_graph_queries: int,
+    max_graph_queries: int,
 ) -> dict[str, str]:
     scene = row["Id"]
     active = patch_columns(int(row["n_patches"]))
@@ -445,47 +601,103 @@ def predict_row(
         matcher.uses_cuda = True
     else:
         matcher = SceneMatcher(image_paths[0], config)
+    height, width = matcher.image.shape
+    image_area = float(height * width)
     candidates_by_query = scene_candidates(root, split, scene, active, matcher, top_k, cache_dir)
     probabilities = membership_probabilities(root, split, scene, active, membership_model)
+
+    direct_scores = np.asarray([group[0].score for group in candidates_by_query], dtype=np.float32)
+    cutoff = presence_cutoff(direct_scores, presence_mode, config, present_rate)
+    present_count = int(np.sum(direct_scores >= cutoff))
+    expected_figure = max(4.0, figure_rate * present_count)
     # The classifier is a useful *proposal* filter, not a final membership
     # decision: the graph must still be allowed to rescue a dim figure star.
     # The 0.60 factor is fixed from the three labelled scenes and is applied
     # identically to every unseen scene, rather than using a scene-size rule.
-    selection_floor = 0.60 * membership_model.threshold
-    selected_queries = np.nonzero(probabilities >= selection_floor)[0].tolist()
-    # Do not infer a pattern from fewer than four patch identities; fall back
-    # to all queries instead of using an arbitrary patch-count heuristic.
-    if len(selected_queries) < 4:
-        selected_queries = list(range(len(active)))
-    graph_candidates = [item for query in selected_queries for item in candidates_by_query[query]]
-    best, runner = choose_fit(patterns, graph_candidates, proposals, seed)
+    # Select by RANK, not by an absolute probability.  The classifier's score
+    # scale shifts between scenes: the 0.60*threshold floor picked 12-17
+    # queries on each labelled scene but only 4-9 on several validation
+    # scenes, and with four queries the support can never exceed four, so
+    # every pattern looks like a coincidence.  Taking a scene-adaptive number
+    # of the most figure-like queries keeps the cloud in the range the
+    # labelled scenes exercised, whatever the probabilities happen to be.
+    target = int(
+        np.clip(round(graph_query_factor * expected_figure), min_graph_queries, max_graph_queries)
+    )
+    order = np.argsort(probabilities)[::-1]
+    selected_queries = sorted(int(index) for index in order[: min(target, len(active))])
+
+    # Fit the graph on a deliberately sparse, high-precision cloud.  Support
+    # earned by coincidence grows with candidate density: on the labelled
+    # scenes the true pattern stays rank 1 against ~50 points but falls to
+    # rank 4 against ~110, and the full top-16 cloud is 336-1392 points.
+    fit_candidates = [
+        item
+        for query in selected_queries
+        for item in candidates_by_query[query][: max(1, graph_top_k)]
+    ]
+    context = FitContext(len(fit_candidates), image_area, expected_figure)
+    best, runner = choose_fit(patterns, fit_candidates, proposals, seed, context)
+
     graph_assignments: dict[int, Candidate] = {}
     if best is not None and best.support >= 4:
-        graph_assignments = best.assignments
+        # Precision chose the pattern; recall now places the stars.  Re-run the
+        # one-to-one assignment against every retained candidate so a figure
+        # star whose best location sat outside the sparse cloud is recovered.
+        dense = [item for query in selected_queries for item in candidates_by_query[query]]
+        graph_assignments = assign_to_mapped(best.mapped_points, dense, best.tolerance)
+        if len(graph_assignments) < best.support:
+            graph_assignments = best.assignments
         row["constellation"] = best.pattern.name
     else:
         row["constellation"] = "unknown"
+
     for query_index, column in enumerate(active):
         direct = candidates_by_query[query_index][0]
         if query_index in graph_assignments:
             point = graph_assignments[query_index]
             row[column] = format_cell(Prediction(point.x, point.y, m=1, score=point.score))
-        elif direct.score >= config.presence_threshold:
+        elif direct.score >= cutoff:
             row[column] = format_cell(Prediction(direct.x, direct.y, m=0, score=direct.score))
         else:
             row[column] = "-1"
     error_text = f"{best.mean_error:.1f}" if best is not None else "n/a"
+    detail = (
+        f"cov={best.coverage:.2f} sig={best.significance:.1f} q={best.quality:.2f}"
+        if best is not None
+        else ""
+    )
     print(
         f"{scene}: {row['constellation']} support={best.support if best else 0} "
-        f"error={error_text} runner={runner.pattern.name if runner else 'none'}", flush=True
+        f"assigned={len(graph_assignments)} error={error_text} {detail} "
+        f"present={present_count}/{len(active)} cloud={len(fit_candidates)} "
+        f"runner={runner.pattern.name if runner else 'none'}",
+        flush=True,
     )
     return row
+
+
+def blank_template(root: Path, split: str) -> list[dict[str, str]]:
+    """Build a prediction template for a split with known scene ids.
+
+    For ``validation`` this is the supplied sample submission.  For ``train``
+    it reuses the labelled file's ids and patch counts with every prediction
+    cell cleared, so the solver can be scored by ``evaluate.py`` without ever
+    reading a training answer during prediction.
+    """
+    if split == "validation":
+        return read_csv_rows(root / "sample_submission.csv")
+    rows = read_csv_rows(root / "train_ground_truth.csv")
+    for row in rows:
+        for column in patch_columns(87):
+            row[column] = "-1"
+        row["constellation"] = "unknown"
+    return rows
 
 
 def write_predictions(
     root: Path,
     split: str,
-    template: Path,
     output: Path,
     config: MatcherConfig,
     top_k: int,
@@ -493,10 +705,17 @@ def write_predictions(
     cache_dir: Optional[Path],
     device: str,
     batch_size: int,
+    graph_top_k: int,
+    presence_mode: str,
+    present_rate: float,
+    figure_rate: float,
+    graph_query_factor: float,
+    min_graph_queries: int,
+    max_graph_queries: int,
 ) -> None:
     patterns = load_patterns(root)
     membership_model = train_membership_classifier(root)
-    rows = read_csv_rows(template)
+    rows = blank_template(root, split)
     fieldnames = list(rows[0])
     for scene_index, row in enumerate(rows):
         predict_row(
@@ -512,13 +731,21 @@ def write_predictions(
             seed=51_179 + scene_index,
             device=device,
             batch_size=batch_size,
+            graph_top_k=graph_top_k,
+            presence_mode=presence_mode,
+            present_rate=present_rate,
+            figure_rate=figure_rate,
+            graph_query_factor=graph_query_factor,
+            min_graph_queries=min_graph_queries,
+            max_graph_queries=max_graph_queries,
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    validate_submission(root, output)
+    if split == "validation":
+        validate_submission(root, output)
     print(f"wrote {output}", flush=True)
 
 
@@ -527,21 +754,54 @@ def main() -> None:
     parser.add_argument("--root", type=Path, default=Path(__file__).parent)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--split", choices=("train", "validation"), default="validation")
     parser.add_argument("--top-k", type=int, default=16)
-    parser.add_argument("--proposals", type=int, default=6_000)
+    parser.add_argument(
+        "--graph-top-k",
+        type=int,
+        default=3,
+        help="Candidates per query used to FIT the graph; --top-k is still used to place stars afterwards",
+    )
+    parser.add_argument(
+        "--proposals",
+        type=int,
+        default=20_000,
+        help=(
+            "RANSAC transform proposals per pattern.  At 6000 (the previous "
+            "default) the true pattern's support on a labelled scene varied "
+            "between 6 and 9 across seeds; from 12000 it was stable at 9."
+        ),
+    )
     parser.add_argument("--cache-dir", type=Path)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--batch-size", type=int, default=48)
+    parser.add_argument("--presence-mode", choices=("threshold", "quantile"), default="quantile")
+    parser.add_argument(
+        "--present-rate",
+        type=float,
+        default=0.61,
+        help="Fraction of patches marked present per scene in quantile mode (train prior: 0.61)",
+    )
+    parser.add_argument(
+        "--figure-rate",
+        type=float,
+        default=0.355,
+        help="Expected figure stars as a fraction of present patches (train prior: 0.33-0.38)",
+    )
+    parser.add_argument("--graph-query-factor", type=float, default=2.0)
+    parser.add_argument("--min-graph-queries", type=int, default=12)
+    parser.add_argument("--max-graph-queries", type=int, default=30)
     args = parser.parse_args()
     if args.top_k < 2:
         parser.error("--top-k must be at least 2")
+    if args.graph_top_k < 1 or args.graph_top_k > args.top_k:
+        parser.error("--graph-top-k must be between 1 and --top-k")
     if args.proposals < 100:
         parser.error("--proposals must be at least 100")
     root = args.root.resolve()
     write_predictions(
         root,
-        "validation",
-        root / "sample_submission.csv",
+        args.split,
         args.output.resolve(),
         load_config(args.config.resolve()),
         args.top_k,
@@ -549,6 +809,13 @@ def main() -> None:
         args.cache_dir.resolve() if args.cache_dir else None,
         args.device,
         args.batch_size,
+        args.graph_top_k,
+        args.presence_mode,
+        args.present_rate,
+        args.figure_rate,
+        args.graph_query_factor,
+        args.min_graph_queries,
+        args.max_graph_queries,
     )
 
 

@@ -28,6 +28,7 @@ from scipy.spatial import cKDTree
 
 from constellation_pipeline import (
     PATCH_RADIUS,
+    Prediction,
     format_cell,
     image_files,
     patch_columns,
@@ -270,7 +271,7 @@ def scene_prediction(
             if len(node):
                 item = candidates[int(fit.candidate_for_node[int(node[0])])]
                 membership = 1
-        row[column] = format_cell((item.x, item.y, membership))
+        row[column] = format_cell(Prediction(x=item.x, y=item.y, m=membership, score=item.score))
     row["constellation"] = fit.pattern.name if fit is not None else "unknown"
     diagnostics: dict[str, object] = {
         "pattern": row["constellation"],

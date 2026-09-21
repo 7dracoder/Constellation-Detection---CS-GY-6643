@@ -458,7 +458,12 @@ def fit_presence_threshold(
 def score_train_predictions(
     root: Path, predictions: dict[str, dict[str, Optional[Prediction]]]
 ) -> dict[str, float]:
-    """Approximate the published metric; membership has no explicit published term."""
+    """Score the localisation components only.
+
+    This is not the competition metric: it has no access to a predicted
+    constellation name and therefore omits the 0.30 identity term.  Use
+    ``evaluate.py`` to compare configurations.
+    """
     truth_rows = read_csv_rows(root / "train_ground_truth.csv")
     scene_scores = []
     for row in truth_rows:
@@ -505,15 +510,21 @@ def score_train_predictions(
             distance = distances[index]
             remaining.pop(index)
             geom_rewards.append(1.0 if distance <= 12 else max(0.0, (36.0 - distance) / 24.0))
-        identification = float(row["constellation"] == "unknown")
+        # This helper only sees localisation predictions, never a predicted
+        # constellation, so it cannot evaluate the 0.30 identity term at all.
+        # It previously substituted ``row["constellation"] == "unknown"``,
+        # which awarded that term for declining to name a scene that does
+        # have a label, and so reported a number that rose as identification
+        # got worse.  The identity term is dropped here and the remaining
+        # components are renormalised; use ``evaluate.py`` for the full
+        # weighted score.
         score = (
             0.25 * float(np.mean(f1s))
             + 0.20 * float(np.mean(localization_rewards))
             + 0.25 * float(np.mean(geom_rewards))
-            + 0.30 * identification
-        )
+        ) / 0.70
         scene_scores.append(score)
-    return {"mean_score": float(np.mean(scene_scores))}
+    return {"localisation_only_mean": float(np.mean(scene_scores))}
 
 
 def calibrate(root: Path, output_config: Path, config: MatcherConfig) -> None:
@@ -546,7 +557,10 @@ def calibrate(root: Path, output_config: Path, config: MatcherConfig) -> None:
         }
         for scene, scene_predictions in raw_predictions.items()
     }
-    print("approximate train score:", score_train_predictions(root, thresholded))
+    print(
+        "localisation-only train score (NOT a leaderboard estimate; run evaluate.py):",
+        score_train_predictions(root, thresholded),
+    )
     output_config.write_text(json.dumps(asdict(config), indent=2) + "\n")
     print(f"wrote {output_config}")
 

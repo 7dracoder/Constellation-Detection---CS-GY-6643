@@ -7,14 +7,26 @@ no external images, labels, datasets, or pretrained models are used.
 
 ## Current status
 
-The current A100/Colab submission is
-[`outputs/submission_a100_wide_fixed.csv`](outputs/submission_a100_wide_fixed.csv).
-It passed the local Kaggle-format validator and scored **0.66890** on Kaggle.
-This is an improvement over the earlier approximately `0.58` and `0.26710`
-submissions, but it is not evidence of a guaranteed future score.
+The current submission is
+[`outputs/submission_v2.csv`](outputs/submission_v2.csv),
+which scored **0.68196** on Kaggle (September 21, 2026).
 
-See [PROJECT_STATUS.md](PROJECT_STATUS.md) for the full experiment record,
-method, scores, known limitations, and next validation plan.
+| Submission | Kaggle |
+| --- | ---: |
+| Initial validated baseline | 0.26710 |
+| Earlier geometric submission | ~0.58 |
+| A100 wide search | 0.66890 |
+| Local RTX 5070 Ti rebuild | **0.68196** |
+
+Candidate localisation is unchanged between the last two; the gain came from
+the geometry, scoring, and calibration stages.  The largest single defect
+fixed was RANSAC under-sampling: at the previous default of 6000 proposals the
+true pattern's support on a labelled scene varied between 6 and 9 across
+seeds, so constellation identity was partly decided by sampling luck.
+
+None of this is evidence of a guaranteed future score.  See
+[PROJECT_STATUS.md](PROJECT_STATUS.md) for the full experiment record, method,
+scores, known limitations, and next validation plan.
 
 ## Competition output
 
@@ -36,6 +48,8 @@ The current best pipeline is composed of:
   membership proposal classifier.
 - `constellation_pipeline.py`: baseline matcher, CSV construction, and strict
   submission validation.
+- `evaluate.py`: four-component scorer for a train-split prediction, used to
+  compare configurations before spending a Kaggle submission.
 
 The GPU-wide configuration keeps 16 spatially distinct candidates per query
 patch. On the 71 labelled-present training patches, this improved exact top-1
@@ -68,15 +82,47 @@ rotation/scale-tolerant local matching, and training-label threshold calibration
 It writes `unknown` as the constellation label and is a baseline rather than the
 current best submission.
 
-## Current A100/Colab output
+## Reproducing the current best
 
-The recommended current submission is the checked-in
-`outputs/submission_a100_wide_fixed.csv`, produced from an A100 Colab runtime
-with `matcher_config_gpu_wide.json`. The final Colab run completed all 16 scenes,
-cached each scene's candidates, and validated the generated CSV before download.
+Requires a CUDA GPU.  Create the environment with a CUDA build of PyTorch
+(the recorded run used `torch 2.11.0+cu128` on an RTX 5070 Ti, compute
+capability 12.0), then:
 
-Do not assume the older notebook's CPU path or any local approximate metric is a
-leaderboard estimate; Kaggle's score is authoritative.
+```sh
+.venv/Scripts/python.exe joint_geometric_solver.py --root . \
+  --config matcher_config_gpu_wide.json \
+  --output outputs/submission_v2.csv \
+  --split validation --device cuda --top-k 16 --graph-top-k 3 \
+  --proposals 20000 --cache-dir outputs/cache_validation \
+  --presence-mode quantile --present-rate 0.625
+```
+
+Per-scene candidates are cached under `--cache-dir`, so changes confined to the
+geometry or scoring stages re-run in minutes without repeating GPU matching.
+
+## Evaluating a change before submitting
+
+`evaluate.py` scores a train-split prediction on all four components with the
+identity term corrected.  The older `score_train_predictions` awarded that term
+for answering `unknown`, so its number rose as identification got worse; it now
+reports localisation components only.
+
+```sh
+.venv/Scripts/python.exe joint_geometric_solver.py --root . \
+  --config matcher_config_gpu_wide.json \
+  --output outputs/train_pred.csv \
+  --split train --device cuda --top-k 16 --graph-top-k 3 \
+  --proposals 20000 --cache-dir outputs/cache_train \
+  --presence-mode quantile --present-rate 0.625
+.venv/Scripts/python.exe evaluate.py --predictions outputs/train_pred.csv
+```
+
+Only three scenes are labelled, and the membership classifier is fitted on
+those same scenes, so treat the result as a regression guard rather than a
+leaderboard estimate.  Kaggle's score is authoritative.
+
+The superseded `outputs/submission_a100_wide_fixed.csv` (0.66890) is retained
+for comparison.
 
 ## NYU Cloud Bursting notes
 

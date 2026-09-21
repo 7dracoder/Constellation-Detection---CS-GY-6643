@@ -24,25 +24,43 @@ models.  That keeps the workflow within the competition/course constraints.
    `outputs/submission_final_colab.csv`, validates it against the exact
    sample-submission schema, and downloads it.
 
+## Colab is no longer the best path
+
+The current best submission (**0.68196**) was produced on a local CUDA GPU, not
+in Colab.  See the "Reproducing the current best" section of
+[README.md](README.md).  This notebook still works and remains a valid
+course-data-only route, but it predates the geometry, scoring, and calibration
+fixes recorded in [PROJECT_STATUS.md](PROJECT_STATUS.md), and in particular it
+defaults to 6000 RANSAC proposals, which was measured to be under-sampled:
+the true pattern's support on a labelled scene varied between 6 and 9 across
+seeds at that budget.  Pass `--proposals 20000` if you run the solver here.
+
 ## What to upload to Kaggle
 
-Upload only the generated file named:
+Upload only the single generated CSV.  For the current best that is
+`submission_v2.csv`.
 
-`submission_a100_wide_fixed.csv`
-
-The final path validates the header, 16 rows, all 87 patch fields, `-1`
-padding, coordinate ranges, and null/blank cells before download. Do not upload
-a JSON diagnostics file or a ZIP.
+Every path validates the header, 16 rows, all 87 patch fields, `-1` padding,
+coordinate ranges, and null/blank cells before download.  Do not upload a JSON
+diagnostics file or a ZIP.
 
 ## Score expectations
 
 The CSV being valid only proves that Kaggle can read it; it does not predict a
-leaderboard score. The earlier baseline scored about 0.26710, an earlier
-geometric run scored about 0.58, and the A100 wide-search run scored 0.66890.
-No run here has established a 0.90 or 0.96 score. The old local approximate
-metric does not correctly evaluate constellation identity and must not be used
-as a leaderboard forecast. Submit the generated CSV and retain the version with
-the better Kaggle score.
+leaderboard score.
+
+| Run | Kaggle |
+| --- | ---: |
+| Initial baseline | 0.26710 |
+| Earlier geometric run | ~0.58 |
+| A100 wide search | 0.66890 |
+| Local RTX 5070 Ti rebuild | **0.68196** |
+
+No run here has established a 0.90 or 0.96 score.  Use `evaluate.py` on a
+train-split prediction to compare configurations before spending a submission;
+do not use the old `score_train_predictions` number, which awarded the identity
+term for answering `unknown`.  Submit the generated CSV and retain the version
+with the better Kaggle score.
 
 See `PROJECT_STATUS.md` for the full method, current output, and known issues.
 
