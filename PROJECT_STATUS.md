@@ -23,7 +23,8 @@ Torch cluster.
 | Initial validated baseline | approximately 0.26710 | Correct schema, but weak localisation and all-`unknown` identity. |
 | Earlier geometric submission | approximately 0.58 | Added candidate shortlists and geometric identity fitting. |
 | A100 wide-search submission | 0.66890 | Superseded: `outputs/submission_a100_wide_fixed.csv`. |
-| RTX 5070 Ti rebuild | **0.68196** | Current best: `outputs/submission_v2.csv`, below. |
+| RTX 5070 Ti rebuild | 0.68196 | Superseded: `outputs/submission_v2.csv`. |
+| Assignment-robustness pass | **0.68431** | Current best: `outputs/submission_v3.csv`. See "September 21, 2026 assignment-robustness pass". |
 
 Kaggle provides a single hidden-label score, not component scores. A valid CSV
 only proves that Kaggle can read it; it does not predict a leaderboard score.
@@ -32,10 +33,22 @@ score guarantee.
 
 ## Current best submission
 
-File: `outputs/submission_v2.csv` (Kaggle **0.68196**, September 21, 2026).
+File: `outputs/submission_v3.csv` (Kaggle **0.68431**, September 21, 2026).
 
-The superseded A100 file described immediately below scored 0.66890 and is
-retained for comparison.
+The gain over the previous best is small: **+0.00235** (0.68196 to 0.68431).
+That is consistent with what the assignment-robustness pass itself predicted
+it could show: 11 of 16 validation labels were unchanged from
+`outputs/submission_v2.csv`, and of the 5 that changed, most were already
+flagged as seed-dependent under the *old* code (see that section below), so
+a small net movement - rather than a large swing in either direction - was
+the expected outcome, not a surprise. `outputs/submission_v2.csv` (0.68196)
+is superseded but retained for comparison, alongside the A100 file below.
+
+## Superseded RTX 5070 Ti rebuild
+
+File: `outputs/submission_v2.csv` (Kaggle 0.68196).  Superseded by
+`outputs/submission_v3.csv` above; see "September 21, 2026 rebuild (local
+RTX 5070 Ti)" for its method.
 
 ## Superseded A100 submission
 
@@ -316,3 +329,113 @@ by leaderboard movement.
 Swap `--split train` and run `evaluate.py --predictions <csv>` to re-check the
 labelled scenes.  Candidates are cached per scene, so geometry-only changes
 re-run in minutes without repeating GPU matching.
+
+## September 21, 2026 assignment-robustness pass
+
+Follow-up to the rebuild above, prompted by a specific request to audit the
+solver for hard-coded values that would not hold on unseen scenes.  Candidate
+localisation and the scoring formula are unchanged; every change is in how a
+transform is proposed, refit, and used to place stars.  Submitted as
+`outputs/submission_v3.csv` (generated under the working filename
+`submission_consensus.csv`, then renamed before upload) and scored
+**0.68431** on Kaggle, **+0.00235** over the previous best.
+
+### What was audited, and what changed
+
+1. **The RANSAC scale-ratio filter was a hard rejection, not a soft
+   preference.** `propose_transforms` only accepted a candidate-pair/node-pair
+   length ratio in `[2, 10]`, chosen because the three labelled scenes'
+   fitted scale factors are 4.4-6.5.  That is a search-time filter only -
+   correctness is still enforced downstream by tolerance and significance -
+   so narrowing it bought nothing, while a held-out scene whose true scale
+   fell outside `[2, 10]` would have had its correct transform silently
+   never proposed, with no signal that anything was missed.  Widened to
+   `[1.3, 18]`.  Verified on an isolated ablation to change nothing on the
+   three labelled scenes (identical winners, identical scores); it only
+   removes a failure mode that could not have been exercised by three
+   examples.
+2. **A single assignment pass was frozen at the seed proposal's accuracy.**
+   Traced one figure star (`pisces patch_11`) whose true candidate sat 2px
+   from truth but 37.6px from its nearest mapped pattern node against a
+   29.5px tolerance - correct, but rejected, with nothing else contesting
+   that node.  `assign_queries` now refits the transform from its own
+   inliers and reassigns repeatedly (bounded at 5 rounds), keeping whichever
+   round scores highest by the same `quality` measure this file already
+   uses to rank RANSAC proposals against each other - not simply the last
+   round computed, since a refit that tightens the transform is not
+   guaranteed to raise the raw assignment count.  Verified by ablation to
+   reproduce the prior single-refit behaviour exactly when capped at one
+   refit round, and to change nothing further on the three labelled scenes
+   when allowed to iterate up to 5 rounds (it already converges by round 2
+   on all three).
+3. **Match margin was computed and immediately discarded.** The matcher
+   already computes each candidate's margin over the next-best candidate at
+   its rank (`Prediction.margin`), but it was dropped the moment a
+   `Candidate` was built, before even reaching the cache.  Threaded end to
+   end: `Candidate` now carries it, the cache stores it (a cache written
+   before this field existed reads back as margin `0.0`, never a fabricated
+   value), and the one-to-one assignment cost can weight it.
+   - **This was tested and found not to help, and is disabled by default.**
+     A four-tuple collision was traced directly (`taurus patch_08` vs
+     `patch_22`, two different patches whose candidates land within 2px of
+     the same star): a naive min-max normalisation of margin was swamped by
+     a couple of outliers (per-candidate margins in this scene cluster
+     within 0.001-0.009 against a scene-wide range of -0.15 to 0.12);
+     switching to percentile-rank normalisation fixed that specific flaw,
+     but a clean, isolated ablation still showed a small regression on the
+     three labelled scenes (train total 0.8393/0.8143 to 0.8331/0.8081 at
+     margin weight 0.15), and in the traced collision itself the true
+     candidate's own margin was *smaller* than the wrong one's.  Margin
+     does not reliably separate correct from coincidental matches in this
+     data, at least not on this little evidence.  `ASSIGNMENT_MARGIN_WEIGHT`
+     defaults to `0.0`; the plumbing is kept for a better use of the signal
+     later, or re-evaluation once more labelled scenes exist.
+4. **A single arbitrary RANSAC seed decided some scenes' identity.**
+   Re-fitting `constellation_08` at 6 independent seeds gave `orion` in 5
+   and `hydra` in 1 - a clear majority, but the one fixed seed the rest of
+   this pipeline used for that scene happened to be the dissenting draw, so
+   the submitted CSV read `hydra`.  Added `choose_fit_consensus`: the final
+   pattern choice now runs `--consensus-trials` (default 5) independent
+   seeds and keeps the plurality-winning pattern, using its own
+   highest-quality fit among the trials that agreed with it.  Confirmed
+   this recovers `orion` for `constellation_08`.  On the three labelled
+   scenes, all three patterns won unanimously across all 5 trials (train
+   total 0.8369/0.8119, an untroubled, noise-level difference from the
+   single-seed 0.8393/0.8143).
+
+### Net effect on the actual submission: Kaggle 0.68431 (+0.00235)
+
+11 of 16 validation labels are unchanged from `outputs/submission_v2.csv`.
+5 changed: `constellation_01`, `03`, `06`, `15`, `16`.  A stability check
+(6 independent seeds each, using the code *before* this pass) had already
+flagged `01`, `03`, `06`, and `16` as scenes where the winning pattern
+depended on which seed ran - so these were not cases of a settled answer
+being disturbed; they were already unsettled.  `constellation_15`'s change
+(`hydra` to `eridanus`) traces to the wider scale band alone and was not
+seed-dependent in the same check.
+
+The +0.00235 result is consistent with that picture, not a surprise: with
+identity worth 0.30 of the metric across 16 scenes, one full scene flipping
+correct is worth about 0.019, so a movement this small is compatible with a
+mix of small gains and losses across the changed scenes rather than a clean
+win or a clean loss on any one of them.  This still cannot be decomposed
+further - Kaggle returns one aggregate number, and only three scenes are
+labelled, with the membership classifier and scoring weights already fitted
+to those same three.  Kaggle's result is the only authoritative signal
+either submission has received; the small, positive movement is the reason
+`outputs/submission_v3.csv` is recorded as the current best above, not proof
+that every individual change in this section was itself correct.
+
+### Reproduce
+
+```sh
+.venv/Scripts/python.exe joint_geometric_solver.py --root . \
+  --config matcher_config_gpu_wide.json \
+  --output outputs/submission_v3.csv \
+  --split validation --device cuda --top-k 16 --graph-top-k 3 \
+  --proposals 20000 --cache-dir outputs/cache_validation \
+  --presence-mode quantile --present-rate 0.625 --consensus-trials 5
+```
+
+This takes roughly 5x longer than the single-seed run above, since the final
+pattern choice is now voted across 5 independent RANSAC seeds per scene.

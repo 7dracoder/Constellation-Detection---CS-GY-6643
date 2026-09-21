@@ -8,21 +8,30 @@ no external images, labels, datasets, or pretrained models are used.
 ## Current status
 
 The current submission is
-[`outputs/submission_v2.csv`](outputs/submission_v2.csv),
-which scored **0.68196** on Kaggle (September 21, 2026).
+[`outputs/submission_v3.csv`](outputs/submission_v3.csv),
+which scored **0.68431** on Kaggle (September 21, 2026).
 
 | Submission | Kaggle |
 | --- | ---: |
 | Initial validated baseline | 0.26710 |
 | Earlier geometric submission | ~0.58 |
 | A100 wide search | 0.66890 |
-| Local RTX 5070 Ti rebuild | **0.68196** |
+| Local RTX 5070 Ti rebuild | 0.68196 |
+| Assignment-robustness pass | **0.68431** |
 
-Candidate localisation is unchanged between the last two; the gain came from
-the geometry, scoring, and calibration stages.  The largest single defect
-fixed was RANSAC under-sampling: at the previous default of 6000 proposals the
-true pattern's support on a labelled scene varied between 6 and 9 across
-seeds, so constellation identity was partly decided by sampling luck.
+Candidate localisation is unchanged across all three GPU runs; the gains came
+from the geometry, scoring, and calibration stages.  The largest single
+defect fixed in the rebuild was RANSAC under-sampling: at the previous
+default of 6000 proposals the true pattern's support on a labelled scene
+varied between 6 and 9 across seeds, so constellation identity was partly
+decided by sampling luck.  The assignment-robustness pass then audited the
+solver for other hard-coded assumptions tuned on the same three labelled
+scenes and fixed the ones that could not have been exercised by them (a
+RANSAC search-time filter, and single-seed dependence in the final pattern
+choice); it also tested a margin-weighting idea, found it did not help, and
+shipped it disabled rather than assumed beneficial.  See
+[PROJECT_STATUS.md](PROJECT_STATUS.md) for the details.  The +0.00235 gain
+is small and consistent with 11 of 16 validation labels being unchanged.
 
 None of this is evidence of a guaranteed future score.  See
 [PROJECT_STATUS.md](PROJECT_STATUS.md) for the full experiment record, method,
@@ -91,14 +100,17 @@ capability 12.0), then:
 ```sh
 .venv/Scripts/python.exe joint_geometric_solver.py --root . \
   --config matcher_config_gpu_wide.json \
-  --output outputs/submission_v2.csv \
+  --output outputs/submission_v3.csv \
   --split validation --device cuda --top-k 16 --graph-top-k 3 \
   --proposals 20000 --cache-dir outputs/cache_validation \
-  --presence-mode quantile --present-rate 0.625
+  --presence-mode quantile --present-rate 0.625 --consensus-trials 5
 ```
 
 Per-scene candidates are cached under `--cache-dir`, so changes confined to the
 geometry or scoring stages re-run in minutes without repeating GPU matching.
+`--consensus-trials 5` votes the final pattern choice across 5 independent
+RANSAC seeds instead of trusting one fixed seed; it costs roughly 5x the
+geometry-fitting time and needs no extra GPU matching.
 
 ## Evaluating a change before submitting
 
@@ -121,8 +133,9 @@ Only three scenes are labelled, and the membership classifier is fitted on
 those same scenes, so treat the result as a regression guard rather than a
 leaderboard estimate.  Kaggle's score is authoritative.
 
-The superseded `outputs/submission_a100_wide_fixed.csv` (0.66890) is retained
-for comparison.
+The superseded `outputs/submission_v2.csv` (0.68196) and
+`outputs/submission_a100_wide_fixed.csv` (0.66890) are retained for
+comparison.
 
 ## NYU Cloud Bursting notes
 

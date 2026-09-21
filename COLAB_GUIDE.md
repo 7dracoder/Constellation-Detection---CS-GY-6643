@@ -26,7 +26,7 @@ models.  That keeps the workflow within the competition/course constraints.
 
 ## Colab is no longer the best path
 
-The current best submission (**0.68196**) was produced on a local CUDA GPU, not
+The current best submission (**0.68431**) was produced on a local CUDA GPU, not
 in Colab.  See the "Reproducing the current best" section of
 [README.md](README.md).  This notebook still works and remains a valid
 course-data-only route, but it predates the geometry, scoring, and calibration
@@ -38,7 +38,7 @@ seeds at that budget.  Pass `--proposals 20000` if you run the solver here.
 ## What to upload to Kaggle
 
 Upload only the single generated CSV.  For the current best that is
-`submission_v2.csv`.
+`submission_v3.csv`.
 
 Every path validates the header, 16 rows, all 87 patch fields, `-1` padding,
 coordinate ranges, and null/blank cells before download.  Do not upload a JSON
@@ -54,7 +54,8 @@ leaderboard score.
 | Initial baseline | 0.26710 |
 | Earlier geometric run | ~0.58 |
 | A100 wide search | 0.66890 |
-| Local RTX 5070 Ti rebuild | **0.68196** |
+| Local RTX 5070 Ti rebuild | 0.68196 |
+| Assignment-robustness pass | **0.68431** |
 
 No run here has established a 0.90 or 0.96 score.  Use `evaluate.py` on a
 train-split prediction to compare configurations before spending a submission;
