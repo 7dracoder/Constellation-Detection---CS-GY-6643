@@ -44,6 +44,22 @@ a small net movement - rather than a large swing in either direction - was
 the expected outcome, not a surprise. `outputs/submission_v2.csv` (0.68196)
 is superseded but retained for comparison, alongside the A100 file below.
 
+## Presence-refined submission
+
+File: `outputs/submission_v4_presence.csv` (Kaggle **0.71544**).
+
+`presence_refiner.py` trains a small regularised logistic classifier from the
+supplied training labels, the raw matcher's top-16 score distribution, and
+simple query-patch brightness/contrast features. It never changes a
+graph-supported `m=1` cell or a constellation label; it only revises the
+presence and raw top-1 location of non-members.
+
+Under leave-one-scene-out prediction, this raised the labelled diagnostic from
+0.8369 to **0.8709** with loose geometry, and from 0.8119 to **0.8459** with
+strict geometry. Presence rose from 0.764 to 0.861 and localisation from 0.562
+to 0.612. Kaggle confirmed the direction of the diagnostic: v4 improved the
+public score by 0.03113 over v3 (0.68431 -> 0.71544).
+
 ## Superseded RTX 5070 Ti rebuild
 
 File: `outputs/submission_v2.csv` (Kaggle 0.68196).  Superseded by

@@ -1,15 +1,20 @@
 # Constellation Detection — CS-GY 6643
 
-This repository contains a reproducible, course-data-only computer-vision
-pipeline for the CS-GY 6643 Constellation Detection competition. It uses only
-the supplied sky images, query patches, pattern diagrams, and training labels:
-no external images, labels, datasets, or pretrained models are used.
+This repository contains a reproducible computer-vision pipeline for the
+CS-GY 6643 Constellation Detection competition. The scored submissions through
+v4 use only the supplied sky images, query patches, pattern diagrams, and
+training labels. Experimental external-catalog work is kept separate and must
+list its public source and licence.
 
 ## Current status
 
-The current submission is
-[`outputs/submission_v3.csv`](outputs/submission_v3.csv),
-which scored **0.68431** on Kaggle (September 21, 2026).
+The current scored submission is
+[`outputs/submission_v4_presence.csv`](outputs/submission_v4_presence.csv).
+It scored **0.71544** on Kaggle (September 21, 2026), improving v3 by 0.03113.
+A leave-one-scene-out presence pass
+raised the labelled diagnostic from 0.8369 to **0.8709** (loose geometry) and
+from 0.8119 to **0.8459** (strict geometry), while leaving graph-supported
+`m=1` placements and constellation labels unchanged.
 
 | Submission | Kaggle |
 | --- | ---: |
@@ -17,7 +22,8 @@ which scored **0.68431** on Kaggle (September 21, 2026).
 | Earlier geometric submission | ~0.58 |
 | A100 wide search | 0.66890 |
 | Local RTX 5070 Ti rebuild | 0.68196 |
-| Assignment-robustness pass | **0.68431** |
+| Assignment-robustness pass | 0.68431 |
+| Presence-refined pass | **0.71544** |
 
 Candidate localisation is unchanged across all three GPU runs; the gains came
 from the geometry, scoring, and calibration stages.  The largest single
@@ -59,6 +65,9 @@ The current best pipeline is composed of:
   submission validation.
 - `evaluate.py`: four-component scorer for a train-split prediction, used to
   compare configurations before spending a Kaggle submission.
+- `presence_refiner.py`: regularised, course-data-only presence classifier
+  using matcher statistics and simple patch features. It preserves all
+  graph-supported members and only revises non-member presence/localisation.
 
 The GPU-wide configuration keeps 16 spatially distinct candidates per query
 patch. On the 71 labelled-present training patches, this improved exact top-1
@@ -136,6 +145,26 @@ leaderboard estimate.  Kaggle's score is authoritative.
 The superseded `outputs/submission_v2.csv` (0.68196) and
 `outputs/submission_a100_wide_fixed.csv` (0.66890) are retained for
 comparison.
+
+## Presence-refined scored submission
+
+Starting from the scored `submission_v3.csv`, reproduce the new candidate:
+
+```sh
+.venv/bin/python presence_refiner.py --root . \
+  --input outputs/submission_v3.csv \
+  --output outputs/submission_v4_presence.csv \
+  --split validation \
+  --cache-dir outputs/cache_validation \
+  --train-cache-dir outputs/cache_train
+.venv/bin/python constellation_pipeline.py validate \
+  --root . --output outputs/submission_v4_presence.csv
+```
+
+The default regularisation and decision threshold were chosen with
+leave-one-scene-out predictions, not same-scene fitted predictions. The three
+labelled scenes are still a very small validation set. Kaggle confirmed a
+0.03113 public-leaderboard improvement over v3.
 
 ## NYU Cloud Bursting notes
 

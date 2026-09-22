@@ -1,6 +1,7 @@
 # Colab submission workflow
 
-`constellation_colab_bundle.zip` is a self-contained, course-data-only package:
+`constellation_colab_bundle.zip` is the original self-contained,
+competition-data-only package:
 
 - supplied `train`, `validation`, and `patterns` images;
 - the supplied `sample_submission.csv` and training labels;
@@ -8,7 +9,8 @@
 - `colab_constellation_submission.ipynb`.
 
 It deliberately contains no external images, labels, datasets, or pretrained
-models.  That keeps the workflow within the competition/course constraints.
+models. Experimental external-catalog work is separate and must remain fully
+reproducible from public, no-cost sources.
 
 ## Run it in Colab
 
@@ -26,8 +28,9 @@ models.  That keeps the workflow within the competition/course constraints.
 
 ## Colab is no longer the best path
 
-The current best submission (**0.68431**) was produced on a local CUDA GPU, not
-in Colab.  See the "Reproducing the current best" section of
+The v3 submission (**0.68431**) was produced on a local CUDA GPU. The current
+best v4 (**0.71544**) applies the Colab-trained presence refiner to that file.
+See the "Reproducing the current best" section of
 [README.md](README.md).  This notebook still works and remains a valid
 course-data-only route, but it predates the geometry, scoring, and calibration
 fixes recorded in [PROJECT_STATUS.md](PROJECT_STATUS.md), and in particular it
@@ -37,8 +40,8 @@ seeds at that budget.  Pass `--proposals 20000` if you run the solver here.
 
 ## What to upload to Kaggle
 
-Upload only the single generated CSV.  For the current best that is
-`submission_v3.csv`.
+Upload only the single generated CSV. The current scored best is
+`submission_v4_presence.csv`.
 
 Every path validates the header, 16 rows, all 87 patch fields, `-1` padding,
 coordinate ranges, and null/blank cells before download.  Do not upload a JSON
@@ -55,7 +58,8 @@ leaderboard score.
 | Earlier geometric run | ~0.58 |
 | A100 wide search | 0.66890 |
 | Local RTX 5070 Ti rebuild | 0.68196 |
-| Assignment-robustness pass | **0.68431** |
+| Assignment-robustness pass | 0.68431 |
+| Presence-refined pass | **0.71544** |
 
 No run here has established a 0.90 or 0.96 score.  Use `evaluate.py` on a
 train-split prediction to compare configurations before spending a submission;
@@ -65,7 +69,10 @@ with the better Kaggle score.
 
 See `PROJECT_STATUS.md` for the full method, current output, and known issues.
 
-## Do not do this
+## External-data experiments
 
-Do not add web images, external constellation datasets, external annotations,
-or pretrained models.  The bundle is designed to use only the project data.
+The signed-in Fall 2026 Kaggle rules currently permit public, equally
+accessible external data and models. The course handout in this repository
+still says external data is not allowed, so retain the instructor's written
+clarification and document every source and licence. Never hand-label or
+manually predict validation/test records; Kaggle explicitly prohibits that.

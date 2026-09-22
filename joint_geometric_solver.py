@@ -4,8 +4,10 @@
 This is a course-data-only second-stage solver.  A query patch has many
 visually plausible star-field locations, so selecting its visual top-1 before
 looking at the constellation graph discards useful evidence.  Here each query
-keeps a bounded shortlist, and a similarity transform of one supplied pattern
-selects a mutually consistent, one-to-one set of figure-star locations.
+keeps a bounded shortlist, and a transform of one supplied pattern selects a
+mutually consistent, one-to-one set of figure-star locations.  The default
+search uses a similarity transform, while ``--transform-model affine`` starts
+from those stable hypotheses and refines them with a full affine transform.
 
 No scene name, patch count, external image, external label, or pretrained
 model is used as a prediction feature.  Training labels calibrate the existing
@@ -321,6 +323,35 @@ def estimate_similarity(source: np.ndarray, target: np.ndarray) -> Optional[tupl
     return matrix, offset
 
 
+def estimate_affine(source: np.ndarray, target: np.ndarray) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Least-squares full affine transform with degeneracy safeguards.
+
+    Three non-collinear correspondences determine an affine transform.  We
+    normally call this with a larger one-to-one consensus produced by the
+    similarity RANSAC search, which avoids the huge false-hypothesis space of
+    blind three-point affine RANSAC.  The singular-value checks reject nearly
+    collapsed or numerically explosive fits before they can attract unrelated
+    candidates on the next ICP-style assignment pass.
+    """
+    if len(source) < 3:
+        return None
+    design = np.concatenate((source.astype(np.float64), np.ones((len(source), 1))), axis=1)
+    if np.linalg.matrix_rank(design) < 3:
+        return None
+    coefficients, _, _, _ = np.linalg.lstsq(design, target.astype(np.float64), rcond=None)
+    matrix = coefficients[:2].T
+    offset = coefficients[2]
+    singular = np.linalg.svd(matrix, compute_uv=False)
+    if (
+        not np.all(np.isfinite(singular))
+        or singular[-1] < 0.35
+        or singular[0] > 30.0
+        or singular[0] / singular[-1] > 8.0
+    ):
+        return None
+    return matrix.astype(np.float32), offset.astype(np.float32)
+
+
 def _rank_normalize(values: np.ndarray) -> np.ndarray:
     """Percentile rank of each value in [0, 1].
 
@@ -431,6 +462,7 @@ def assign_queries(
     offset: np.ndarray,
     candidates: list[Candidate],
     context: FitContext,
+    transform_model: str = "similarity",
     max_iterations: int = MAX_REFIT_ITERATIONS,
 ) -> Optional[GraphFit]:
     """Assign query patches to mapped pattern nodes, refitting to convergence.
@@ -476,7 +508,11 @@ def assign_queries(
             break
         target_points = np.asarray([(c.x, c.y) for c in assignments.values()], np.float32)
         node_indices = np.asarray([node_for_query[q] for q in assignments], dtype=np.int32)
-        refined = estimate_similarity(source_points[node_indices], target_points)
+        refined = (
+            estimate_affine(source_points[node_indices], target_points)
+            if transform_model == "affine"
+            else estimate_similarity(source_points[node_indices], target_points)
+        )
         if refined is None:
             break
         current_matrix, current_offset = refined
@@ -553,22 +589,31 @@ def graph_fit_from_assignment(
 
 
 def fit_pattern(
-    pattern: Pattern, candidates: list[Candidate], proposals: int, seed: int, context: FitContext
+    pattern: Pattern,
+    candidates: list[Candidate],
+    proposals: int,
+    seed: int,
+    context: FitContext,
+    transform_model: str,
 ) -> Optional[GraphFit]:
     """Fit both possible handednesses of a supplied reference pattern."""
     best: Optional[GraphFit] = None
     for reflected, source in enumerate((pattern.points, pattern.points * np.array((1.0, -1.0), np.float32))):
         matrices, offsets = propose_transforms(source, candidates, proposals, seed + 10_007 * reflected)
         for matrix, offset, _ in top_hypotheses(source, candidates, matrices, offsets):
-            fit = assign_queries(pattern, source, matrix, offset, candidates, context)
+            fit = assign_queries(
+                pattern, source, matrix, offset, candidates, context, transform_model=transform_model
+            )
             if fit is not None and (best is None or fit.quality > best.quality):
                 best = fit
     return best
 
 
-def _fit_pattern_task(args: tuple[Pattern, list[Candidate], int, int, FitContext]) -> Optional[GraphFit]:
-    pattern, candidates, proposals, seed, context = args
-    return fit_pattern(pattern, candidates, proposals, seed, context)
+def _fit_pattern_task(
+    args: tuple[Pattern, list[Candidate], int, int, FitContext, str]
+) -> Optional[GraphFit]:
+    pattern, candidates, proposals, seed, context, transform_model = args
+    return fit_pattern(pattern, candidates, proposals, seed, context, transform_model)
 
 
 def choose_fit(
@@ -577,12 +622,13 @@ def choose_fit(
     proposals: int,
     seed: int,
     context: FitContext,
+    transform_model: str = "similarity",
 ) -> tuple[Optional[GraphFit], Optional[GraphFit]]:
     # This runs after the CUDA scene matcher has initialized.  Threads avoid
     # forking a process with a live CUDA context, which can deadlock in Colab.
     # NumPy/SciPy do the expensive numeric work outside Python's GIL.
     tasks = [
-        (pattern, candidates, proposals, seed + 101 * index, context)
+        (pattern, candidates, proposals, seed + 101 * index, context, transform_model)
         for index, pattern in enumerate(patterns)
     ]
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -609,6 +655,7 @@ def choose_fit_consensus(
     seed: int,
     context: FitContext,
     trials: int,
+    transform_model: str = "similarity",
 ) -> tuple[Optional[GraphFit], Optional[GraphFit]]:
     """Run ``choose_fit`` at several seeds and report the plurality winner.
 
@@ -625,7 +672,15 @@ def choose_fit_consensus(
     depends on scene identity.
     """
     outcomes = [
-        choose_fit(patterns, candidates, proposals, seed + 7_919 * trial, context) for trial in range(max(1, trials))
+        choose_fit(
+            patterns,
+            candidates,
+            proposals,
+            seed + 7_919 * trial,
+            context,
+            transform_model,
+        )
+        for trial in range(max(1, trials))
     ]
     winners = [best for best, _ in outcomes if best is not None]
     if not winners:
@@ -758,6 +813,7 @@ def predict_row(
     min_graph_queries: int,
     max_graph_queries: int,
     consensus_trials: int,
+    transform_model: str,
 ) -> dict[str, str]:
     scene = row["Id"]
     active = patch_columns(int(row["n_patches"]))
@@ -806,7 +862,15 @@ def predict_row(
         for item in candidates_by_query[query][: max(1, graph_top_k)]
     ]
     context = FitContext(len(fit_candidates), image_area, expected_figure)
-    best, runner = choose_fit_consensus(patterns, fit_candidates, proposals, seed, context, consensus_trials)
+    best, runner = choose_fit_consensus(
+        patterns,
+        fit_candidates,
+        proposals,
+        seed,
+        context,
+        consensus_trials,
+        transform_model,
+    )
 
     graph_assignments: dict[int, Candidate] = {}
     if best is not None and best.support >= 4:
@@ -882,6 +946,7 @@ def write_predictions(
     min_graph_queries: int,
     max_graph_queries: int,
     consensus_trials: int,
+    transform_model: str,
 ) -> None:
     patterns = load_patterns(root)
     membership_model = train_membership_classifier(root)
@@ -909,6 +974,7 @@ def write_predictions(
             min_graph_queries=min_graph_queries,
             max_graph_queries=max_graph_queries,
             consensus_trials=consensus_trials,
+            transform_model=transform_model,
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as stream:
@@ -980,6 +1046,16 @@ def main() -> None:
             "depending on one arbitrary seed."
         ),
     )
+    parser.add_argument(
+        "--transform-model",
+        choices=("similarity", "affine"),
+        default="similarity",
+        help=(
+            "Transform used after similarity-RANSAC initialization.  Affine "
+            "adds independent axis scale and shear, matching the assignment's "
+            "statement that pattern aspect ratio is unrelated to the scene."
+        ),
+    )
     args = parser.parse_args()
     if args.top_k < 2:
         parser.error("--top-k must be at least 2")
@@ -1006,6 +1082,7 @@ def main() -> None:
         args.min_graph_queries,
         args.max_graph_queries,
         args.consensus_trials,
+        args.transform_model,
     )
 
 
