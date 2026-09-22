@@ -26,7 +26,7 @@ import presence_refiner as pr
 from evaluate import score_scene
 from structural_refiner import train_membership_classifier
 from download_training_images import download
-from geometric_ensemble import choose_both
+from shared_geometry_search import choose_both
 
 
 def write_csv(path, rows):

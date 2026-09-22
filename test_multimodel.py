@@ -8,7 +8,7 @@ import numpy as np
 import structural_refiner as sr
 import joint_geometric_solver as jg
 import presence_refiner as pr
-from geometric_ensemble import choose_both
+from shared_geometry_search import choose_both
 from annular_refiner import masks, normalized_masked, refine
 from multimodel_pipeline import CandidateModel, promotion, rerank, ranking_diagnostic, fit_candidate_model
 
