@@ -26,22 +26,31 @@ reproducible from public, no-cost sources.
    `outputs/submission_final_colab.csv`, validates it against the exact
    sample-submission schema, and downloads it.
 
-## Colab is no longer the best path
+## Current v5 path
 
-The v3 submission (**0.68431**) was produced on a local CUDA GPU. The current
-best v4 (**0.71544**) applies the Colab-trained presence refiner to that file.
-See the "Reproducing the current best" section of
-[README.md](README.md).  This notebook still works and remains a valid
-course-data-only route, but it predates the geometry, scoring, and calibration
-fixes recorded in [PROJECT_STATUS.md](PROJECT_STATUS.md), and in particular it
-defaults to 6000 RANSAC proposals, which was measured to be under-sampled:
-the true pattern's support on a labelled scene varied between 6 and 9 across
-seeds at that budget.  Pass `--proposals 20000` if you run the solver here.
+The scored best v4 is **0.71544**. The unscored v5 candidate adds affine
+refinement and conservative identity gating. Colab/A100 produced the cached
+top-16 image matches; once those caches exist, affine fitting is CPU geometry
+and does not benefit from repeating image matching on the GPU.
+
+For a fresh runtime, clone the catalog submodules and run the commands in the
+"Affine-gated v5 candidate" section of [README.md](README.md):
+
+```sh
+!git clone --recurse-submodules \
+  https://github.com/7dracoder/Constellation-Detection---CS-GY-6643.git
+%cd Constellation-Detection---CS-GY-6643
+!python -m pip install -q -r requirements.txt
+```
+
+The older notebook still works as a valid course-data-only route, but it
+predates the geometry, scoring, presence, and calibration fixes recorded in
+[PROJECT_STATUS.md](PROJECT_STATUS.md).
 
 ## What to upload to Kaggle
 
-Upload only the single generated CSV. The current scored best is
-`submission_v4_presence.csv`.
+Upload only one CSV. The scored fallback is `submission_v4_presence.csv`; the
+new candidate to test is `submission_v5_affine_gated.csv`.
 
 Every path validates the header, 16 rows, all 87 patch fields, `-1` padding,
 coordinate ranges, and null/blank cells before download.  Do not upload a JSON
@@ -60,6 +69,7 @@ leaderboard score.
 | Local RTX 5070 Ti rebuild | 0.68196 |
 | Assignment-robustness pass | 0.68431 |
 | Presence-refined pass | **0.71544** |
+| Affine-gated candidate | not submitted |
 
 No run here has established a 0.90 or 0.96 score.  Use `evaluate.py` on a
 train-split prediction to compare configurations before spending a submission;

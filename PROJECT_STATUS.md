@@ -455,3 +455,50 @@ that every individual change in this section was itself correct.
 
 This takes roughly 5x longer than the single-seed run above, since the final
 pattern choice is now voted across 5 independent RANSAC seeds per scene.
+
+## September 21-22, 2026 affine and external-catalog pass
+
+The assignment says diagram aspect ratio is unrelated to the scene, but the
+solver still used only rotation + uniform scale + translation. A full affine
+transform was therefore added as a safeguarded refinement after the existing
+similarity-RANSAC initialization. Blind three-point affine RANSAC was avoided:
+any three non-collinear points define an affine map and would create too many
+false hypotheses in these dense candidate clouds.
+
+Five-seed train regression results after the same presence refinement:
+
+| Model | Presence | Localisation | Loose geometry | Strict geometry | Identity | Loose total | Strict total |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Similarity | 0.861 | 0.611 | 0.900 | 0.833 | 3/3 | 0.8625 | 0.8458 |
+| Affine | 0.850 | 0.623 | 1.000 | 0.900 | 3/3 | **0.8871** | **0.8621** |
+
+The affine validation run disagreed with v4 identity on scenes 01, 03, 06,
+and 16. All four were weak/ambiguous fits. `submission_ensemble.py` therefore
+uses affine rows only on the other 12 scenes and retains the complete v4 row
+on disagreements. Copying only the old name would be invalid reasoning because
+the retained `m=1` points would still describe the affine solver's other
+pattern. The resulting upload candidate is
+`outputs/submission_v5_affine_gated.csv`; schema validation reports 16 rows,
+90 columns, and zero blank/null cells. SHA-256:
+`726c1af12d267315c883f208255c867daf300b559a33ffceea88f957c1efd9b1`.
+
+### Public external catalog check
+
+The signed-in Fall 2026 Kaggle rules permit public, equally accessible external
+data/models, although the older handout in this repo still says external data
+is prohibited. Keep the instructor's written clarification. No validation row
+was hand-labeled.
+
+Two public repositories are pinned as submodules:
+
+- `ofrohn/d3-celestial` (BSD-3-Clause), used for constellation line geometry;
+- `MarcvdSluys/ConstellationLines` (CC BY 4.0), retained as a second documented
+  catalog source but not used to rewrite v5.
+
+`external_catalog_validator.py` is read-only. It independently recovers
+Pisces, Scorpius, and Taurus from the exact labeled `m=1` coordinates (3/3),
+then agrees with 10/16 v5 identities. It supports several strong predictions
+including Corona Australis, Canis Major, Hydra, Aries, Perseus, Orion, Lupus,
+Corona Borealis, and Eridanus. Weak disagreements are not automatically
+substituted because catalog line conventions differ from the supplied pattern
+diagrams and the validator's own runner-up is sometimes the submitted label.

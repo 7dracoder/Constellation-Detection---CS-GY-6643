@@ -1,0 +1,6 @@
+[submodule "external/d3-celestial"]
+	path = external/d3-celestial
+	url = https://github.com/ofrohn/d3-celestial.git
+[submodule "external/ConstellationLines"]
+	path = external/ConstellationLines
+	url = https://github.com/MarcvdSluys/ConstellationLines.git

@@ -11,6 +11,12 @@ list its public source and licence.
 The current scored submission is
 [`outputs/submission_v4_presence.csv`](outputs/submission_v4_presence.csv).
 It scored **0.71544** on Kaggle (September 21, 2026), improving v3 by 0.03113.
+The next validated candidate is
+[`outputs/submission_v5_affine_gated.csv`](outputs/submission_v5_affine_gated.csv).
+It has not been scored yet: it uses full-affine refinement on the 12 scenes
+where affine and similarity geometry agree on identity, and retains the entire
+v4 row on the four disagreements so the label and `m=1` coordinates cannot
+describe different patterns.
 A leave-one-scene-out presence pass
 raised the labelled diagnostic from 0.8369 to **0.8709** (loose geometry) and
 from 0.8119 to **0.8459** (strict geometry), while leaving graph-supported
@@ -24,6 +30,7 @@ from 0.8119 to **0.8459** (strict geometry), while leaving graph-supported
 | Local RTX 5070 Ti rebuild | 0.68196 |
 | Assignment-robustness pass | 0.68431 |
 | Presence-refined pass | **0.71544** |
+| Affine-gated candidate | not submitted |
 
 Candidate localisation is unchanged across all three GPU runs; the gains came
 from the geometry, scoring, and calibration stages.  The largest single
@@ -57,8 +64,8 @@ The current best pipeline is composed of:
 - `gpu_matcher.py`: CUDA/A100 coarse-to-fine patch localisation with a broad
   rotation/scale search and local intensity, gradient, and SSIM refinement.
 - `joint_geometric_solver.py`: joint constellation-pattern fitting using the
-  supplied diagrams, similarity transforms, reflection handling, and one-to-one
-  star assignments.
+  supplied diagrams, similarity-RANSAC initialization, optional full-affine
+  refinement, reflection handling, and one-to-one star assignments.
 - `structural_refiner.py`: supplied-pattern extraction and a small patch-only
   membership proposal classifier.
 - `constellation_pipeline.py`: baseline matcher, CSV construction, and strict
@@ -68,6 +75,11 @@ The current best pipeline is composed of:
 - `presence_refiner.py`: regularised, course-data-only presence classifier
   using matcher statistics and simple patch features. It preserves all
   graph-supported members and only revises non-member presence/localisation.
+- `submission_ensemble.py`: keeps affine rows only when affine and established
+  geometry agree on identity; disagreements retain the complete established
+  row rather than mixing a name with another pattern's coordinates.
+- `external_catalog_validator.py`: read-only identity cross-check against the
+  public d3-celestial line catalog. It never rewrites a submission.
 
 The GPU-wide configuration keeps 16 spatially distinct candidates per query
 patch. On the 71 labelled-present training patches, this improved exact top-1
@@ -165,6 +177,52 @@ The default regularisation and decision threshold were chosen with
 leave-one-scene-out predictions, not same-scene fitted predictions. The three
 labelled scenes are still a very small validation set. Kaggle confirmed a
 0.03113 public-leaderboard improvement over v3.
+
+## Affine-gated v5 candidate
+
+The assignment states that a diagram's aspect ratio is unrelated to its sky
+appearance. The original solver nevertheless refit only similarity transforms,
+which preserve aspect ratio. The affine mode keeps the stable two-point
+similarity search, then refines each consensus with a safeguarded six-parameter
+affine transform.
+
+```sh
+.venv/bin/python joint_geometric_solver.py --root . \
+  --config matcher_config_gpu_wide.json \
+  --output outputs/submission_v5_affine_base.csv \
+  --top-k 16 --graph-top-k 3 --proposals 12000 \
+  --cache-dir outputs/cache_validation \
+  --presence-mode quantile --present-rate 0.625 \
+  --consensus-trials 5 --transform-model affine
+.venv/bin/python presence_refiner.py --root . \
+  --input outputs/submission_v5_affine_base.csv \
+  --output outputs/submission_v5_affine_presence.csv \
+  --split validation --cache-dir outputs/cache_validation \
+  --train-cache-dir outputs/cache_train
+.venv/bin/python submission_ensemble.py --root . \
+  --established outputs/submission_v4_presence.csv \
+  --candidate outputs/submission_v5_affine_presence.csv \
+  --output outputs/submission_v5_affine_gated.csv
+```
+
+On the three labeled scenes, five-seed affine + presence refinement raised the
+loose diagnostic from 0.8625 to **0.8871** and the strict diagnostic from
+0.8458 to **0.8621**, with identity remaining 3/3. These are regression checks,
+not a leaderboard estimate.
+
+Initialize the public catalog submodules and run the independent, read-only
+identity check with:
+
+```sh
+git submodule update --init --recursive
+.venv/bin/python external_catalog_validator.py --root . \
+  --input outputs/submission_v5_affine_gated.csv
+```
+
+The validator recovers all three labeled identities from exact figure points
+and agrees with 10/16 v5 identities. The remaining external fits are weak or
+ambiguous, so catalog output is recorded as evidence rather than used as an
+automatic label oracle.
 
 ## NYU Cloud Bursting notes
 
