@@ -16,7 +16,7 @@ SOURCES = (
     ("eso0106a", "AURA", "The Milky Way star field around CS 31082-001"),
     ("eso1427a", "ESO", "The dark cloud Lupus 4"),
     ("eso1439a", "ESO/G. Beccari", "The colourful star cluster NGC 3532"),
-    ("eso1242a", "ESO/VVV Consortium; acknowledgement: Ignacio Toledo, Martin Kornmesser", "VISTA central Milky Way mosaic"),
+    ("eso1242a", "ESO/VVV Survey/D. Minniti; Acknowledgement: Ignacio Toledo, Martin Kornmesser", "VISTA central Milky Way mosaic"),
 )
 LICENSE = "https://www.eso.org/public/copyright/"
 
@@ -51,6 +51,7 @@ def download(output: Path):
         target = output / f"{identifier}.jpg"
         prior = by_id.get(identifier)
         if target.exists() and prior and hashlib.sha256(target.read_bytes()).hexdigest() == prior["sha256"]:
+            prior["credit"] = credit
             records.append(prior)
             print("cached", identifier, flush=True)
             continue

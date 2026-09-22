@@ -205,6 +205,29 @@ def promotion(baseline, challenger):
                         for s, v in baseline["per_scene"].items()))
 
 
+def ranking_diagnostic(data, truth, model):
+    saved, coords, features, _ = data
+    ranked = rerank(saved, features, model)
+    counts = dict(present=0, raw_top1=0, ensemble_top1=0, oracle_top16=0,
+                  figure=0, raw_figure_top1=0, ensemble_figure_top1=0)
+    for qi, column in enumerate(saved["columns"]):
+        target = cp.parse_cell(truth[column])
+        if target is None:
+            continue
+        distances = np.linalg.norm(coords[qi]-target[:2], axis=1)
+        point = ranked[qi][0]
+        hit = np.linalg.norm(np.array([point.x, point.y])-target[:2]) <= 12
+        counts["present"] += 1
+        counts["raw_top1"] += int(distances[0] <= 12)
+        counts["ensemble_top1"] += int(hit)
+        counts["oracle_top16"] += int(np.min(distances) <= 12)
+        if target[2]:
+            counts["figure"] += 1
+            counts["raw_figure_top1"] += int(distances[0] <= 12)
+            counts["ensemble_figure_top1"] += int(hit)
+    return counts
+
+
 def main():
     from neural_patch_models import train_models
     parser = argparse.ArgumentParser()
@@ -227,9 +250,11 @@ def main():
     truth = {row["Id"]: row for row in cp.read_csv_rows(root/"train_ground_truth.csv")}
     train = {scene: candidate_features(root, "train", scene, models, out) for scene in truth}
     patterns = jg.load_patterns(root)
-    baseline, challenger, audits = [], [], []
+    baseline, challenger, audits, ranking = [], [], [], {}
     for scene in truth:
         ranker = fit_candidate_model(train, truth, exclude=scene)
+        ranking[scene] = ranking_diagnostic(train[scene], truth[scene], ranker)
+        print("HELD_OUT_RANKING", scene, json.dumps(ranking[scene]), flush=True)
         membership = train_membership_classifier(root, excluded_scene=scene)
         presence = pr.train_classifier(root, root/"outputs"/"cache_train", excluded_scene=scene)
         template = truth[scene].copy()
@@ -243,7 +268,7 @@ def main():
             audits.append(audit)
     b, c = summary(truth, baseline), summary(truth, challenger)
     accepted = promotion(b, c)
-    report = dict(baseline=b, challenger=c, promoted=accepted, diagnostics=audits,
+    report = dict(baseline=b, challenger=c, promoted=accepted, diagnostics=audits, ranking=ranking,
                   parameters=vars(args) | {"root": str(root)}, python=platform.python_version(),
                   caveat="Three held-out scenes; not a Kaggle estimate. No validation labels used.")
     (out/"report.json").write_text(json.dumps(report, indent=2)+"\n")

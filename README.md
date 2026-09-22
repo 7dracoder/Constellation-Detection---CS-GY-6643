@@ -31,6 +31,7 @@ from 0.8119 to **0.8459** (strict geometry), while leaving graph-supported
 | Assignment-robustness pass | 0.68431 |
 | Presence-refined pass | **0.71544** |
 | Affine-gated candidate | not submitted |
+| Teammate graphguard (v6) | 0.70102 (not promoted) |
 
 Candidate localisation is unchanged across all three GPU runs; the gains came
 from the geometry, scoring, and calibration stages.  The largest single
@@ -86,6 +87,20 @@ patch. On the 71 labelled-present training patches, this improved exact top-1
 localisation from 36 to 49 and exact top-16 candidate recall from 56 to 63.
 
 ## Setup
+
+For the external-image multi-model experiment, open
+[`colab_multimodel.ipynb`](colab_multimodel.ipynb) in Colab with a GPU runtime.
+It trains two complementary patch encoders, combines their evidence with the
+cached correlation matcher and radial photometry, fits presence/membership
+models, evaluates similarity and affine geometry, and downloads a CSV plus
+the model/report archive. Sources and credits are in
+[`EXTERNAL_TRAINING_DATA.md`](EXTERNAL_TRAINING_DATA.md).
+
+The experiment holds entire scenes out of all three downstream classifiers.
+Both neural encoders pretrain only on external observations and synthetic
+patches. The report records whether the ensemble passes its promotion gate;
+if it fails, `submission_recommended.csv` is explicitly the scored v4 fallback.
+`submission_multimodel_experimental.csv` remains available for inspection.
 
 ```sh
 uv venv .venv

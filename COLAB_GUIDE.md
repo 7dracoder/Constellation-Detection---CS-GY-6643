@@ -1,5 +1,17 @@
 # Colab submission workflow
 
+For the new multi-model pipeline, open **`colab_multimodel.ipynb`**, select an
+A100/GPU runtime, and run its cells. It automatically downloads four attributed
+ESO observations, trains two complementary CNN descriptors, runs scene-held-out
+calibration, tests the geometric ensemble and downloads the recommended CSV
+and a ZIP containing checkpoints/reports. See `EXTERNAL_TRAINING_DATA.md`.
+
+The notebook's report states whether the new ensemble passed its evaluation
+gate. If it failed, the recommended file is the scored v4 fallback; the
+experimental ensemble is separately named so a failed experiment is never
+presented as an established improvement. Older instructions below are retained
+for the earlier baselines.
+
 `constellation_colab_bundle.zip` is the original self-contained,
 competition-data-only package:
 

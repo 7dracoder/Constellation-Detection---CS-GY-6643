@@ -1,18 +1,19 @@
 # Project status — Constellation Detection, CS-GY 6643
 
-Last updated: September 21, 2026
+Last updated: September 22, 2026
 
 ## Scope and compliance
 
-This project is intentionally restricted to the course-provided materials:
+The scored submissions through v4 use the course-provided materials:
 
 - supplied training and validation sky images;
 - supplied 32×32 query patches;
 - supplied constellation-pattern diagrams; and
 - supplied training labels.
 
-It does **not** use web images, external astronomical data, external labels,
-pretrained weights, or external models. NYU's course guidance also requires
+The multi-model experiment now also uses public ESO observations after the
+user reported instructor approval for external data. Sources, credits and
+preprocessing are recorded in `EXTERNAL_TRAINING_DATA.md`. NYU's guidance requires
 coursework to use Cloud Bursting/Open OnDemand instead of the researcher-facing
 Torch cluster.
 
@@ -21,17 +22,25 @@ Torch cluster.
 | Submission stage | Kaggle score | Notes |
 | --- | ---: | --- |
 | Initial validated baseline | approximately 0.26710 | Correct schema, but weak localisation and all-`unknown` identity. |
-| Earlier geometric submission | approximately 0.58 | Added candidate shortlists and geometric identity fitting. |
+| Earlier geometric submission | 0.58634 | Added candidate shortlists and geometric identity fitting. |
 | A100 wide-search submission | 0.66890 | Superseded: `outputs/submission_a100_wide_fixed.csv`. |
 | RTX 5070 Ti rebuild | 0.68196 | Superseded: `outputs/submission_v2.csv`. |
-| Assignment-robustness pass | **0.68431** | Current best: `outputs/submission_v3.csv`. See "September 21, 2026 assignment-robustness pass". |
+| Assignment-robustness pass | 0.68431 | Superseded: `outputs/submission_v3.csv`. |
+| Presence refinement | **0.71544** | Current scored best: `outputs/submission_v4_presence.csv`. |
+| Affine gating | Not submitted | `outputs/submission_v5_affine_gated.csv`; absent from Kaggle history checked September 22. |
+| Teammate graphguard | 0.70102 | `submission_v6_graphguard.csv`; below the v4 best, so not promoted. |
+
+The submission history above was checked directly on the signed-in Kaggle
+Submissions page on September 22, 2026. The graphguard artifact is not present
+in this checkout; its filename and score are recorded from Kaggle, not an
+assumed reconstruction of its code.
 
 Kaggle provides a single hidden-label score, not component scores. A valid CSV
 only proves that Kaggle can read it; it does not predict a leaderboard score.
 No implementation or experiment in this repository establishes a 0.90 or 0.96
 score guarantee.
 
-## Current best submission
+## Previous v3 submission
 
 File: `outputs/submission_v3.csv` (Kaggle **0.68431**, September 21, 2026).
 

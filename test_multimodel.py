@@ -6,7 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 import structural_refiner as sr
-from multimodel_pipeline import CandidateModel, promotion, rerank
+from multimodel_pipeline import CandidateModel, promotion, rerank, ranking_diagnostic
 
 
 class EnsembleChecks(unittest.TestCase):
@@ -42,6 +42,28 @@ class EnsembleChecks(unittest.TestCase):
         self.assertFalse(promotion(base, worse))
         worse["mean"]["identity"] = 1.
         self.assertTrue(promotion(base, worse))
+
+    def test_promotion_rejects_large_individual_scene_loss(self):
+        base = dict(mean=dict(total_loose=.8, total_strict=.78, identity=1.),
+                    per_scene={"s": dict(total_loose=.8)})
+        challenger = dict(mean=dict(total_loose=.85, total_strict=.83, identity=1.),
+                          per_scene={"s": dict(total_loose=.75)})
+        self.assertFalse(promotion(base, challenger))
+
+    def test_ranking_diagnostic_ignores_absent_patches(self):
+        saved = {"columns": ["patch_01", "patch_02"],
+                 "candidates": [[[100*i, 100*i, 1-i/20., 0.] for i in range(16)]] * 2}
+        coords = np.array([[[100*i, 100*i] for i in range(16)]] * 2)
+        features = np.zeros((2, 16, 1))
+        class FlatModel:
+            def predict(self, x):
+                return np.zeros(x.shape[:2])
+        result = ranking_diagnostic((saved, coords, features, (3000, 3000)),
+                                    {"patch_01": "(0, 0, 1)", "patch_02": "-1"}, FlatModel())
+        self.assertEqual(result["present"], 1)
+        self.assertEqual(result["raw_top1"], 1)
+        self.assertEqual(result["ensemble_top1"], 1)
+        self.assertEqual(result["figure"], 1)
 
 
 if __name__ == "__main__":
