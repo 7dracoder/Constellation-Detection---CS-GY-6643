@@ -511,3 +511,45 @@ including Corona Australis, Canis Major, Hydra, Aries, Perseus, Orion, Lupus,
 Corona Borealis, and Eridanus. Weak disagreements are not automatically
 substituted because catalog line conventions differ from the supplied pattern
 diagrams and the validator's own runner-up is sometimes the submitted label.
+
+## September 22, 2026 external-image multi-model experiment
+
+Training executed in the user's live Colab session on an **NVIDIA
+A100-SXM4-40GB**, not the local laptop. The run started from commit
+`14131744f169b31649c412eedd9a809c8268f494` with 4,000 updates for each of two
+CNN patch encoders (intensity and high-pass). Pretraining used 18,362 crops
+from four downloaded ESO observations and 12,000 synthetic star patches.
+Exact source credits and preprocessing are in `EXTERNAL_TRAINING_DATA.md`.
+
+The downstream pipeline combines cached image-correlation candidates, both
+CNN descriptors, radial photometry, a regularized candidate classifier,
+presence/membership classifiers, and similarity/affine geometric consensus.
+Unlike earlier train regression numbers, each evaluated scene is excluded
+from **all three downstream classifiers**, not only the presence classifier.
+CNN pretraining uses no competition images. Geometry uses 12,000 proposals
+per pattern and three seeds per transformation family.
+
+| Scene-held-out metric | Classical ranking | Neural ensemble ranking |
+| --- | ---: | ---: |
+| Presence macro-F1 | 0.86096 | 0.86096 |
+| Localisation | **0.62346** | 0.61111 |
+| Loose geometry | 1.00000 | 1.00000 |
+| Strict geometry | 0.90000 | 0.90000 |
+| Identity | 3/3 | 3/3 |
+| Loose total proxy | **0.88993** | 0.88746 |
+| Strict total proxy | **0.86493** | 0.86246 |
+
+**The ensemble failed its promotion gate.** Lower contrastive training loss
+did not translate into better held-out localisation. These are three-scene
+diagnostics under an approximate scorer, not Kaggle scores. This experiment
+does not establish an improvement over the public best of 0.71544 and must
+not be advertised as a 0.93 model.
+
+`colab_multimodel.ipynb` makes the distinction explicit: the separately named
+experimental CSV contains new predictions, while the recommended CSV falls
+back to the established v4 file on a failed gate. The exporter preserves
+checkpoints, candidate features, train predictions, report, source manifest,
+hashes and a fixed-geometry ranking-weight diagnostic so the run can be
+audited without retraining. Training-manifest bytes are preserved separately
+from a corrected-credit attribution copy to keep checkpoint fingerprints
+reproducible.

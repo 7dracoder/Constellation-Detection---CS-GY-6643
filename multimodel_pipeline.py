@@ -26,6 +26,7 @@ import presence_refiner as pr
 from evaluate import score_scene
 from structural_refiner import train_membership_classifier
 from download_training_images import download
+from geometric_ensemble import choose_both
 
 
 def write_csv(path, rows):
@@ -117,9 +118,10 @@ class CandidateModel:
 
 def fit_candidate_model(data, truth, exclude=None):
     x, y = [], []
-    for scene, (_, coords, features, _) in data.items():
+    for scene, scene_data in data.items():
         if scene == exclude:
             continue
+        _, coords, features, _ = scene_data
         for qi, col in enumerate(data[scene][0]["columns"]):
             target = cp.parse_cell(truth[scene][col])
             distances = np.full(16, 1e6) if target is None else np.linalg.norm(coords[qi]-target[:2], axis=1)
@@ -164,8 +166,8 @@ def predict_scene(root, split, template, scene_data, rank_model, membership, pre
     context = jg.FitContext(len(sparse), float(shape[0]*shape[1]), expected)
     # Seed derives only from input identity, with no label-specific parameters.
     seed = 51179 + int(hashlib.sha256(scene.encode()).hexdigest()[:6], 16)
-    best_sim, _ = jg.choose_fit_consensus(patterns, sparse, proposals, seed, context, trials, "similarity")
-    best_aff, _ = jg.choose_fit_consensus(patterns, sparse, proposals, seed, context, trials, "affine")
+    fits = choose_both(patterns, sparse, proposals, seed, context, trials)
+    best_sim, best_aff = fits["similarity"], fits["affine"]
     chosen = best_sim
     if best_aff is not None and (best_sim is None or best_aff.pattern.name == best_sim.pattern.name):
         chosen = best_aff
