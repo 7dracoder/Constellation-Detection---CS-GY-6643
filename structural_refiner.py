@@ -115,12 +115,14 @@ def macro_f1(labels: np.ndarray, predicted: np.ndarray) -> float:
     return float(np.mean(values))
 
 
-def train_membership_classifier(root: Path) -> MembershipClassifier:
+def train_membership_classifier(root: Path, excluded_scene: Optional[str] = None) -> MembershipClassifier:
     """Fit only on provided training query patches that are known present."""
     truth = parse_truth_rows(root)
     features: list[np.ndarray] = []
     labels: list[int] = []
     for scene, values in truth.items():
+        if scene == excluded_scene:
+            continue
         patch_dir = root / "train" / scene / "patches"
         for column, target in values.items():
             if target is None:

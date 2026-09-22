@@ -8,3 +8,8 @@ __pycache__/
 # notebooks, and generated CSV outputs are tracked instead.
 constellation_colab_a100_bundle.zip
 constellation_colab_bundle.zip
+
+# Downloaded observations and reproducible training intermediates.
+external/training_images/*.jpg
+outputs/multimodel/*.pt
+outputs/multimodel/*.npz
