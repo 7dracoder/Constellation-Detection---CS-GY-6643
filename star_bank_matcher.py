@@ -25,6 +25,8 @@ import numpy as np
 from constellation_pipeline import (
     PATCH_RADIUS,
     PATCH_SIZE,
+    denoise_patch,
+    denoise_sky,
     extract_from_padded,
     gradient_vectors,
     image_files,
@@ -219,6 +221,7 @@ def enrich_scene_cache(
     if len(image_paths) != 1:
         raise ValueError(f"Expected one sky image for {split}/{scene}")
     image = read_grayscale(image_paths[0])
+    image = denoise_sky(image)
     bank_xy, bank_strengths = detect_star_bank(image, bank_size=bank_size)
     padded = cv2.copyMakeBorder(
         image, PATCH_RADIUS, PATCH_RADIUS, PATCH_RADIUS, PATCH_RADIUS, cv2.BORDER_REFLECT101
@@ -234,7 +237,7 @@ def enrich_scene_cache(
     enriched = []
     recovered = 0
     for query_index, column in enumerate(active):
-        query = read_grayscale(root / split / scene / "patches" / f"{column}.png")
+        query = denoise_patch(read_grayscale(root / split / scene / "patches" / f"{column}.png"))
         if query.shape != (PATCH_SIZE, PATCH_SIZE):
             raise ValueError(f"Unexpected patch shape {query.shape} in {scene}/{column}")
         bank_hits = match_query_to_bank(
@@ -260,7 +263,7 @@ def enrich_scene_cache(
         "star_bank_strength_max": float(bank_strengths[0]) if len(bank_strengths) else 0.0,
         "candidates": enriched,
         "source_cache": str(cache_path),
-        "enrichment": "multi_scale_dog_star_bank",
+        "enrichment": "multi_scale_dog_star_bank_denoised",
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload))

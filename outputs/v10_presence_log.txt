@@ -1,0 +1,4 @@
+wrote /workspace/outputs/submission_v10_denoise_affine_presence.csv
+accepted affine rows: 12 (constellation_02, constellation_04, constellation_05, constellation_07, constellation_08, constellation_10, constellation_11, constellation_12, constellation_13, constellation_14, constellation_15, constellation_17)
+kept established rows: 4 (constellation_01:sagittarius!=hydra, constellation_03:taurus!=lepus, constellation_06:aries!=tucana, constellation_16:eridanus!=pavo)
+wrote /workspace/outputs/submission_v10_denoise_gated.csv

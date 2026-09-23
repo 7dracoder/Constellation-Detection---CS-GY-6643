@@ -1,0 +1,17 @@
+  pisces: 10/41 patches  bank=150
+  pisces: 20/41 patches  bank=150
+  pisces: 30/41 patches  bank=150
+  pisces: 40/41 patches  bank=150
+  pisces: 41/41 patches  bank=150
+pisces: wrote /workspace/outputs/cache_train_denoised_starbank/pisces.json (new-top candidates≈0)
+  scorpius: 10/41 patches  bank=150
+  scorpius: 20/41 patches  bank=150
+  scorpius: 30/41 patches  bank=150
+  scorpius: 40/41 patches  bank=150
+  scorpius: 41/41 patches  bank=150
+scorpius: wrote /workspace/outputs/cache_train_denoised_starbank/scorpius.json (new-top candidates≈3)
+  taurus: 10/34 patches  bank=150
+  taurus: 20/34 patches  bank=150
+  taurus: 30/34 patches  bank=150
+  taurus: 34/34 patches  bank=150
+taurus: wrote /workspace/outputs/cache_train_denoised_starbank/taurus.json (new-top candidates≈0)
