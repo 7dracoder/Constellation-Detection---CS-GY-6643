@@ -285,17 +285,23 @@ def resolve_duplicates(
         if chosen == established:
             assigned[scene] = established
             continue
-        # Geometry guard: do not accept a clearly worse pattern.
+        cat = catalog_scores.get(scene, {})
+        catalog_prefers_chosen = (
+            cat.get(chosen, 0.0) > cat.get(established, 0.0) + CATALOG_SWAP_MARGIN
+        )
+        # Geometry guard: always reject a clearly worse pattern unless the
+        # public catalog strongly prefers the alternative (private-endgame
+        # catalog-backed swaps like eridanus→scorpius).
         if (
-            not force_unique
-            and established_fit is not None
+            established_fit is not None
             and established_fit.quality - chosen_fit.quality > DISTINCT_SWAP_TOLERANCE
+            and not catalog_prefers_chosen
         ):
             assigned[scene] = established
             continue
-        # Catalog guard (skipped under force_unique — uniqueness is then the
-        # primary goal and catalog only influenced the reward matrix).
-        cat = catalog_scores.get(scene, {})
+        # Catalog guard in soft mode: do not leave an established label the
+        # catalog likes better.  Under force_unique the second pass may still
+        # break remaining duplicates within geometry tolerance.
         if (
             not force_unique
             and cat.get(established, 0.0) > cat.get(chosen, 0.0) + CATALOG_SWAP_MARGIN
@@ -323,12 +329,19 @@ def resolve_duplicates(
             keep = holders[0]
             claimed = set(assigned.values()) - {name}
             claimed.add(name)  # reserved by keep
+            keep_fit = disputed[keep].fit_for(name)
+            keep_quality = keep_fit.quality if keep_fit is not None else -1e9
             for scene in holders[1:]:
                 sf = disputed[scene]
+                # Only force-break when an unused alternative is within the
+                # same geometry tolerance used elsewhere — avoids weak forced
+                # labels (e.g. support=4 auriga far below the kept canis-major).
                 alternatives = [
                     fit
                     for fit in sf.ranked_fits
-                    if fit.pattern.name not in claimed and fit.pattern.name not in reserved
+                    if fit.pattern.name not in claimed
+                    and fit.pattern.name not in reserved
+                    and (keep_quality - fit.quality) <= DISTINCT_SWAP_TOLERANCE
                 ]
                 if not alternatives:
                     continue
