@@ -1,0 +1,20 @@
+established duplicates: ['canis-major', 'eridanus']
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+loaded 45 catalog patterns
+catalog constellation_04: {'canis-major': 17.60920193774385}
+catalog constellation_11: {'canis-major': 16.906533661666195}
+catalog constellation_15: {'scorpius': 18.201522913265734, 'sagittarius': 17.89772380336823}
+catalog constellation_16: {'perseus': 8.90093715814167, 'eridanus': 8.616242865599316}
+fitting disputed scene constellation_04 (canis-major)
+  ranked=['canis-major:13.13', 'hydra:10.06', 'auriga:7.06', 'scorpius:6.92', 'columba:6.64']
+fitting disputed scene constellation_11 (canis-major)
+  ranked=['canis-major:15.88', 'musca:8.72', 'hydra:8.19', 'scutum:7.88', 'equuleus:7.58']
+fitting disputed scene constellation_15 (eridanus)
+  ranked=['eridanus:18.56', 'hydra:17.82', 'carina:12.40', 'sagittarius:12.03', 'canis-major:11.56']
+fitting disputed scene constellation_16 (eridanus)
+  ranked=['hydrus:9.34', 'lyra:9.31', 'lepus:8.68', 'auriga:7.96', 'bootes:7.63']
+constellation_04: FINAL auriga support=4 assigned=4
+constellation_15: FINAL scorpius support=7 assigned=7
+changes: constellation_04:canis-major->auriga; constellation_15:eridanus->scorpius
+final unique=16 dups=none
+wrote /Users/tanmaysahu/participant/outputs/submission_v8_catalog_forceunique.csv
