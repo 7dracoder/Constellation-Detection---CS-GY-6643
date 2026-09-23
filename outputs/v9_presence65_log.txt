@@ -1,0 +1,22 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_01: ursa-major support=6 assigned=7 error=7.5 cov=0.38 sig=10.5 q=10.29 present=15/23 cloud=36 runner=hydra
+constellation_02: corona-australis support=6 assigned=7 error=2.9 cov=0.60 sig=12.0 q=12.41 present=16/24 cloud=36 runner=none
+constellation_03: scorpius support=5 assigned=5 error=9.9 cov=0.38 sig=6.5 q=6.28 present=20/31 cloud=42 runner=sagittarius
+constellation_04: canis-major support=10 assigned=13 error=3.9 cov=0.62 sig=12.6 q=12.91 present=35/54 cloud=75 runner=none
+constellation_05: hydra support=8 assigned=9 error=4.2 cov=0.47 sig=11.6 q=11.22 present=57/87 cloud=90 runner=none
+constellation_06: aries support=4 assigned=4 error=3.1 cov=1.00 sig=8.1 q=8.20 present=40/61 cloud=84 runner=hydra
+constellation_07: perseus support=7 assigned=8 error=3.2 cov=0.64 sig=13.3 q=13.51 present=16/24 cloud=36 runner=none
+constellation_08: hydra support=5 assigned=5 error=7.6 cov=0.29 sig=7.4 q=6.89 present=24/37 cloud=51 runner=orion
+constellation_10: centaurus support=11 assigned=14 error=7.4 cov=0.69 sig=14.3 q=14.56 present=39/60 cloud=84 runner=none
+constellation_11: canis-major support=10 assigned=13 error=5.7 cov=0.62 sig=15.4 q=15.62 present=34/52 cloud=72 runner=none
+constellation_12: lupus support=7 assigned=11 error=4.5 cov=0.58 sig=11.7 q=12.02 present=18/28 cloud=39 runner=none
+constellation_13: pavo support=5 assigned=5 error=3.8 cov=0.45 sig=8.8 q=8.73 present=21/32 cloud=45 runner=carina
+constellation_14: corona-borealis support=6 assigned=7 error=7.5 cov=0.86 sig=12.3 q=12.46 present=23/36 cloud=48 runner=none
+constellation_15: eridanus support=12 assigned=16 error=7.4 cov=0.44 sig=16.7 q=16.52 present=45/69 cloud=90 runner=hydra
+constellation_16: pavo support=5 assigned=5 error=15.2 cov=0.45 sig=7.4 q=7.30 present=14/21 cloud=36 runner=lepus
+constellation_17: ursa-minor support=5 assigned=6 error=3.8 cov=0.71 sig=10.5 q=10.70 present=19/29 cloud=39 runner=none
+wrote /workspace/outputs/submission_v9_presence65_raw.csv
+wrote /workspace/outputs/submission_v9_presence65_ungated.csv
+accepted affine rows: 12 (constellation_02, constellation_04, constellation_05, constellation_06, constellation_07, constellation_10, constellation_11, constellation_12, constellation_13, constellation_14, constellation_15, constellation_17)
+kept established rows: 4 (constellation_01:sagittarius!=ursa-major, constellation_03:taurus!=scorpius, constellation_08:orion!=hydra, constellation_16:eridanus!=pavo)
+wrote /workspace/outputs/submission_v9_presence65.csv

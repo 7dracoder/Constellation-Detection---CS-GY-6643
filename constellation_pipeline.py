@@ -66,6 +66,54 @@ def read_grayscale(path: Path) -> np.ndarray:
     return image.astype(np.float32)
 
 
+def denoise_sky(image: np.ndarray) -> np.ndarray:
+    """Star-preserving cleanup: kill impulse noise and grain, keep star cores.
+
+    Heavy blur destroys the point sources this competition depends on.  The
+    procedure therefore:
+
+    1. builds a bright-core mask from the high-pass residual;
+    2. replaces only isolated impulse outliers *outside* that mask with a
+       3×3 median; and
+    3. applies a mild bilateral filter for grain, then writes the preserved
+       cores back on top so localisation stays sharp.
+    """
+    if image.dtype != np.uint8:
+        image_u8 = np.clip(np.rint(image), 0, 255).astype(np.uint8)
+    else:
+        image_u8 = image
+    src = image_u8.astype(np.float32)
+
+    background = cv2.GaussianBlur(src, (0, 0), 8.0)
+    residual = src - background
+    residual_scale = float(np.std(residual)) + 1e-3
+    core = residual > max(12.0, 2.5 * residual_scale * 0.35)
+    # Tiny dilation so the PSF wings stay with the core.
+    core = cv2.dilate(core.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(bool)
+
+    median3 = cv2.medianBlur(image_u8, 3).astype(np.float32)
+    impulse = np.abs(src - median3) > max(18.0, 2.0 * residual_scale)
+    cleaned = src.copy()
+    cleaned[impulse & ~core] = median3[impulse & ~core]
+
+    bilateral = cv2.bilateralFilter(
+        np.clip(cleaned, 0, 255).astype(np.uint8),
+        d=5,
+        sigmaColor=16,
+        sigmaSpace=4,
+    ).astype(np.float32)
+    out = bilateral
+    out[core] = cleaned[core]
+    return out
+
+
+def denoise_patch(patch: np.ndarray) -> np.ndarray:
+    """Light denoise for 32×32 query patches; preserves the central star."""
+    if patch.shape[0] < 8 or patch.shape[1] < 8:
+        return patch.astype(np.float32)
+    return denoise_sky(patch)
+
+
 def parse_cell(value: str) -> Optional[tuple[int, int, int]]:
     if value.strip() == "-1":
         return None
@@ -92,8 +140,9 @@ def patch_columns(n_patches: int) -> list[str]:
 
 def normalize_image(image: np.ndarray, background_sigma: float) -> np.ndarray:
     """Suppress slow illumination while retaining point-source structure."""
-    background = cv2.GaussianBlur(image, (0, 0), background_sigma)
-    high_pass = image - background
+    cleaned = denoise_sky(image)
+    background = cv2.GaussianBlur(cleaned, (0, 0), background_sigma)
+    high_pass = cleaned - background
     local_scale = cv2.GaussianBlur(np.abs(high_pass), (0, 0), background_sigma)
     normalized = high_pass / (local_scale + 4.0)
     return np.clip(normalized, -8.0, 8.0).astype(np.float32)
@@ -231,7 +280,9 @@ class SceneMatcher:
 
     def __init__(self, image_path: Path, config: MatcherConfig):
         self.config = config
-        self.image = read_grayscale(image_path)
+        # Denoise before building search pyramids so grain/hot pixels do not
+        # create false coarse peaks or pull fine refinement off true stars.
+        self.image = denoise_sky(read_grayscale(image_path))
         self.padded_image = cv2.copyMakeBorder(
             self.image,
             PATCH_RADIUS,
@@ -330,7 +381,7 @@ class SceneMatcher:
         to resolve those ambiguities.  Candidates are still computed solely
         from the query patch and its own scene.
         """
-        query = read_grayscale(query_path)
+        query = denoise_patch(read_grayscale(query_path))
         if query.shape != (PATCH_SIZE, PATCH_SIZE):
             raise ValueError(f"Unexpected patch shape {query.shape} in {query_path}")
         if limit < 1:

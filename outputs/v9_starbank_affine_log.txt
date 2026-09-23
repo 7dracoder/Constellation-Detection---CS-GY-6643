@@ -1,0 +1,18 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_01: hydra support=7 assigned=7 error=4.1 cov=0.41 sig=12.5 q=12.23 present=14/23 cloud=36 runner=carina
+constellation_02: corona-australis support=6 assigned=8 error=2.4 cov=0.60 sig=12.0 q=12.37 present=15/24 cloud=36 runner=none
+constellation_03: lepus support=5 assigned=5 error=9.6 cov=0.38 sig=5.7 q=5.57 present=19/31 cloud=39 runner=eridanus
+constellation_04: canis-major support=10 assigned=13 error=3.9 cov=0.62 sig=12.8 q=13.13 present=34/54 cloud=72 runner=none
+constellation_05: hydra support=8 assigned=8 error=3.6 cov=0.47 sig=11.6 q=11.28 present=54/87 cloud=90 runner=none
+constellation_06: tucana support=4 assigned=4 error=2.3 cov=1.00 sig=8.2 q=8.32 present=38/61 cloud=81 runner=hydra
+constellation_07: perseus support=7 assigned=8 error=2.7 cov=0.64 sig=13.2 q=13.44 present=15/24 cloud=36 runner=none
+constellation_08: orion support=5 assigned=9 error=2.1 cov=0.25 sig=7.1 q=6.83 present=23/37 cloud=48 runner=hydra
+constellation_10: centaurus support=10 assigned=14 error=5.6 cov=0.62 sig=12.6 q=12.76 present=38/60 cloud=81 runner=none
+constellation_11: canis-major support=10 assigned=13 error=5.3 cov=0.62 sig=15.6 q=15.88 present=32/52 cloud=69 runner=none
+constellation_12: lupus support=7 assigned=11 error=4.5 cov=0.58 sig=11.7 q=12.02 present=18/28 cloud=39 runner=none
+constellation_13: pavo support=5 assigned=5 error=2.4 cov=0.45 sig=9.0 q=8.99 present=20/32 cloud=42 runner=hydra
+constellation_14: corona-borealis support=6 assigned=6 error=6.1 cov=0.86 sig=12.2 q=12.56 present=22/36 cloud=48 runner=none
+constellation_15: eridanus support=12 assigned=16 error=6.8 cov=0.44 sig=16.7 q=16.58 present=43/69 cloud=90 runner=hydra
+constellation_16: pavo support=5 assigned=5 error=15.2 cov=0.45 sig=7.4 q=7.22 present=13/21 cloud=36 runner=lepus
+constellation_17: ursa-minor support=5 assigned=6 error=1.1 cov=0.71 sig=10.5 q=10.89 present=18/29 cloud=39 runner=none
+wrote /workspace/outputs/submission_v9_starbank_affine.csv

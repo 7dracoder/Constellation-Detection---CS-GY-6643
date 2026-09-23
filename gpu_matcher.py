@@ -24,6 +24,7 @@ from constellation_pipeline import (
     MatcherConfig,
     Prediction,
     SceneMatcher,
+    denoise_patch,
     extract_from_padded,
     fit_presence_threshold,
     format_cell,
@@ -165,7 +166,7 @@ class TorchCoarseSceneMatcher(SceneMatcher):
         coarse-to-fine matching rule while making the wider, course-data-only
         transform bank practical for the full validation split.
         """
-        query = read_grayscale(query_path)
+        query = denoise_patch(read_grayscale(query_path))
         if query.shape != (PATCH_SIZE, PATCH_SIZE):
             raise ValueError(f"Unexpected patch shape {query.shape} in {query_path}")
         if limit < 1:

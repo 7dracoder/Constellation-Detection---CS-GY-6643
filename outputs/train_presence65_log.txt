@@ -1,0 +1,5 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+pisces: pisces support=9 assigned=11 error=12.8 cov=0.50 sig=11.3 q=11.27 present=27/41 cloud=57 runner=none
+scorpius: scorpius support=10 assigned=12 error=5.7 cov=0.77 sig=17.8 q=18.22 present=27/41 cloud=57 runner=none
+taurus: taurus support=8 assigned=10 error=7.1 cov=0.73 sig=15.2 q=15.58 present=22/34 cloud=48 runner=none
+wrote /workspace/outputs/train_predictions_presence65.csv
