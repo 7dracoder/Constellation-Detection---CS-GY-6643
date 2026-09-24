@@ -1,6 +1,6 @@
 # Project status — Constellation Detection, CS-GY 6643
 
-Last updated: September 22, 2026
+Last updated: September 24, 2026
 
 ## Scope and compliance
 
@@ -26,7 +26,9 @@ Torch cluster.
 | A100 wide-search submission | 0.66890 | Superseded: `outputs/submission_a100_wide_fixed.csv`. |
 | RTX 5070 Ti rebuild | 0.68196 | Superseded: `outputs/submission_v2.csv`. |
 | Assignment-robustness pass | 0.68431 | Superseded: `outputs/submission_v3.csv`. |
-| Presence refinement | **0.71544** | Current scored best: `outputs/submission_v4_presence.csv`. |
+| Presence refinement | 0.71544 | Former best: `outputs/submission_v4_presence.csv`. |
+| Gaussian sigma=0.65 hybrid + multi-width gate | 0.73803 | Former best: `outputs/submission_hybrid_gaussian_multiwidth_gated.csv`; user-reported Kaggle result September 23. |
+| Gaussian sigma=0.85 hybrid + same identity gate | **0.74973** | Current scored best: `outputs/submission_hybrid_gaussian085_multiwidth_gated.csv`; user-reported Kaggle result September 23. |
 | Affine gating | Not submitted | `outputs/submission_v5_affine_gated.csv`; absent from Kaggle history checked September 22. |
 | Teammate graphguard | 0.70102 | `submission_v6_graphguard.csv`; below the v4 best, so not promoted. |
 
@@ -39,6 +41,345 @@ Kaggle provides a single hidden-label score, not component scores. A valid CSV
 only proves that Kaggle can read it; it does not predict a leaderboard score.
 No implementation or experiment in this repository establishes a 0.90 or 0.96
 score guarantee.
+
+## Final-day submission triage (September 24, 2026)
+
+The user supplied the signed-in Fall 2026 Evaluation text: scene scores are
+averaged equally, with 0.25 presence macro-F1, 0.20 patch-specific
+localisation, 0.25 set-based figure-star recovery, and 0.30 identity. Point
+reward is full through 12 px and falls to zero at 36 px. Figure stars match
+all reported points one-to-one, nearest pairs first. The public leaderboard
+uses roughly 40% of hidden scenes, so a one-scene change can be invisible
+publicly while still affecting the private score. `evaluate.py` now uses the
+specified nearest-pairs-first geometric matcher. The Fall 2025 competition
+page had a different metric; do not use it to decide Fall 2026 submissions.
+
+Three daily submission slots remained when this triage began. Do **not** spend
+one first on the fixed-node ownership-only file: it changes only the 20%
+patch-localisation component for one scene. It is not score-identical under
+the 2026 metric, but its upside is narrower than the alternatives below.
+
+Candidate A, `outputs/submission_scene01_15_hydra.csv`, replaces complete
+algorithm-produced rows in scenes 01 and 15 only, leaving all other scenes
+identical to the scored 0.74973 file. Raw course-data geometry supports Hydra
+with 8 and 12 stars respectively. A read-only public-catalog consistency
+check agrees with Hydra at its normal 12,000-proposal budget: scene 01 has
+support 7, quality 16.80, runner quality 10.76; scene 15 has support 11,
+quality 26.80, runner quality 18.08. The fallback Sagittarius and Eridanus
+rows did not receive catalog agreement at the same budget. The catalog is
+corroboration, not hidden truth. This is the main higher-upside *unscored*
+candidate, SHA-256
+`82CF76BAB34D898CA943D3E2F18CF9A13FDF7E9E2DB9FEF42CE4C9F0B5F14D3F`.
+An additional 4,000-proposal robustness audit kept Hydra first for both
+scenes under two different affine random seeds and a similarity transform.
+The independent catalog fit gave support 7 for scene 01 in all checks, and
+support 10-11 for scene 15. This tests fit stability, not hidden accuracy;
+older course-data solver variants disagreed on these identities, especially
+scene 15.
+
+Candidate B, `outputs/submission_fusion085_065_t54_rate15_gated.csv`, keeps
+all scored labels and graph-member cells. It accepts two-filter presence
+additions only when at most 15% of a scene's patches are newly marked
+present. The general rate rule rejects a 30-addition outlier scene and leaves
+14 added nonmember detections across six scenes. A strict scene-held-out
+three-scene check scored 0.9059 versus 0.9038 for the established candidate,
+from one extra correctly detected training patch. That small check does not
+guarantee a hidden gain. The file is valid and unscored, SHA-256
+`A58900CFFEE6F06A9F48D68D732E43E949B6BBAF59F7C5E53CC64DA96218307B`.
+
+Candidate C, `outputs/submission_scene01_15_hydra_fusion_rate15.csv`, combines
+A's complete rows with B's bounded additions elsewhere. It is valid and
+unscored, SHA-256
+`9FE20F420CF444132E3D1B12DE18DB3F647417B5ECABB75DD7F09C288C361FB3`.
+The scored 0.74973 file remains intact. Reserve the third daily slot until
+the first two results are known; public feedback may be uninformative for
+an individual scene, and final selection should weigh method evidence as
+well as public score.
+
+## Gaussian-hybrid progression
+
+Previous file: `outputs/submission_hybrid_gaussian_multiwidth_gated.csv` (Kaggle
+**0.73803**, reported September 23, 2026).
+
+This pass introduced two independently gated improvements:
+
+- multi-width affine geometry evaluates both a narrow membership-ranked query
+  cloud and a 1.5x broader cloud, selecting with the existing density-adjusted
+  quality rather than scene identity or labels;
+- matched Gaussian denoising (`sigma=0.65`) is applied to both scene and query
+  images for a second candidate cache. Raw candidates still drive geometry;
+  denoised candidates only refine non-member presence and localisation.
+
+On the three labelled scenes, Gaussian matching raised top-1 candidate recall
+from 49/71 to 58/71 and retained-list recall from 63/71 to 67/71. The hybrid
+leave-one-scene-out diagnostic reached 0.8993 strict/loose, 3/3 identities,
+1.000 strict geometry, 0.858 presence, and 0.674 localisation. Using denoised
+candidates for geometry scored only 0.8617 strict, so that variant was rejected.
+The final identity gate keeps the complete established v4 row wherever the
+new and established predicted constellation names disagree.
+
+Artifact audit: 16 rows, 90 columns, SHA-256
+`FE259FAA89BF05DD3AB05D2D9CAAFC06BAEFAEE70F2C7B2A2D1457EFED8822A0`.
+
+### Noise-removal ablation
+
+Matched Gaussian smoothing at `sigma=0.65` is the retained denoiser. A second
+September 23 experiment subtracted a slowly varying Gaussian background after
+smoothing. It was rejected on the labelled candidate-retrieval audit: exact
+top-1 recall fell from 58/71 to 28/71, and retained-list recall fell from 67/71
+to 48/71. The low-frequency patch context is therefore informative to the
+matcher, not disposable noise. No validation submission was built from this
+failed variant.
+
+A controlled Gaussian-strength sweep then measured:
+
+| Candidate cache | Top-1 recall | Retained recall | End-to-end strict/loose |
+| --- | ---: | ---: | ---: |
+| Raw | 49/71 | 63/71 | not the denoised hybrid |
+| Gaussian `sigma=0.45` | 54/71 | 65/71 | not promoted |
+| Gaussian `sigma=0.65` | 58/71 | 67/71 | 0.8993 |
+| Gaussian `sigma=0.85` | 58/71 | 67/71 | **0.9014** |
+
+At `sigma=0.85`, presence rose from 0.858 to 0.866 and localisation from
+0.674 to 0.675 relative to `sigma=0.65`; identity stayed 3/3 and strict
+geometry stayed 1.000. The validation candidate
+`outputs/submission_hybrid_gaussian085_multiwidth_gated.csv` preserves the
+same nine accepted identities and seven complete v4 fallback rows as the
+0.73803 file. Its 24 changed cells are all non-member cells: 6 additions,
+9 removals, and 9 `m=0` relocations; no `m=1` geometry changed. The candidate
+is schema-valid, has 16 rows and 90 columns, and has SHA-256
+`8A36B9E3E8294815EE0DFCB54C9C24863BE3F6C039B5A502F4B067180E70044D`.
+Kaggle scored this `sigma=0.85` artifact at **0.74973**, a gain of 0.01170
+over `sigma=0.65` and 0.03429 over v4. It is now the current scored best.
+
+### Multi-width distinct-identity experiment
+
+The validation geometry frequently predicts the same label for several scenes
+(especially Hydra), even though the competition split is consistent with one
+scene per supplied constellation. `distinct_label_solver.py` now evaluates the
+same narrow and 1.5x-expanded membership clouds as the successful multi-width
+geometry pass, retains each pattern's own winning cloud, and applies a guarded
+one-to-one assignment only when an alternative fit is within 1.25 quality
+units of that scene's independent best.
+
+On the three labelled scenes, the solver retained Pisces, Scorpius, and Taurus
+with best-to-runner quality margins of 3.84, 7.91, and 7.11 respectively. After
+the established Gaussian presence/localisation refinement, the full diagnostic
+remained 0.8993 strict/loose with 3/3 identities and 1.000 strict geometry.
+This establishes non-regression on known data; it does not prove the distinct
+validation-label assumption, so any validation output remains a candidate for
+comparison rather than an automatic promotion.
+
+The validation audit also showed why strict uniqueness must not be assumed:
+both scenes 04 and 11 had strong Canis Major fits, ahead of their runners by
+5.14 and 6.74 quality units. Guarded assignment changed only three low-margin
+collisions (03 to Sagittarius, 05 to Serpens Caput, and 16 to Scorpius), but
+the resulting file differs from the scored identity gate on seven scenes and
+is not promoted. Broad query clouds also over-selected Hydra on several
+ambiguous scenes, so future identity work should add width/seed stability and
+pattern-specific null-fit calibration before changing scored identities.
+
+### Rejected two-Gaussian confidence fusion
+
+`presence_refiner.py` now supports multiple candidate caches and exposes
+cross-filter location-agreement features while preserving exact single-cache
+behavior. The single-cache `sigma=0.85` compatibility run reproduced the
+existing CSV byte-for-byte. A scene-held-out fusion of `sigma=0.85` and
+`sigma=0.65` initially scored 0.8988 at the established 0.58 threshold. A
+bounded threshold sweep found 0.54 reached 0.9034, changing only one labelled
+patch and preserving 3/3 identities plus 1.000 strict geometry.
+
+That apparent gain did not survive the validation-distribution audit. Relative
+to the scored 0.74973 file, the 0.54 fusion candidate added 44 non-member
+detections, concentrated heavily in scene 04. A one-patch change across the
+three labelled scenes does not support that scale of validation change. The
+candidate `outputs/submission_hybrid_fusion085_065_t54_multiwidth_gated.csv`
+is therefore rejected and must not be submitted. This is evidence that
+absolute multi-view probability calibration is unstable with only three
+labelled scenes; future fusion should use a bounded change budget or
+rank/stability gate learned without relying on a global probability threshold.
+
+### Corrected scene-held-out evaluation and error ledger
+
+The earlier 0.9014 train diagnostic held out each scene from presence-model
+training, but `joint_geometric_solver.py` had trained its patch membership
+selector on all three labelled scenes. The new
+`--cross-validated-membership` option trains that selector on the other two
+scenes for each train prediction. It cannot be used on validation. Running the
+existing raw adaptive candidate cache through two-width affine geometry,
+then the established `sigma=0.85` cache through scene-held-out presence
+refinement, gives **0.9038** strict/loose, 3/3 identities, and 1.000 set-based
+strict geometry. The member selector used 44, 45, and 53 labelled-present
+patches in the Pisces, Scorpius, and Taurus folds respectively. All cache
+generation is label-free; matcher settings and search hyperparameters were
+chosen in earlier experiments using these same three scenes, so this is still
+a regression check, not an unbiased leaderboard estimate.
+
+`evaluate.py` now also prints patch-specific `memberF1` without changing the
+historical total. It is **0.471** mean (Pisces 0.583, Scorpius 0.455, Taurus
+0.375), versus 1.000 for set-based geometry. The latter matches the set of
+predicted figure points to the set of true points and can hide a swap between
+query patches. Only 15 of 36 predicted `m=1` patches have the correct query,
+membership bit, and position within 12 pixels; eight `m=1` predictions are
+on patches that are actually absent.
+
+The patch-level diagnostic is in
+`outputs/train_strict_heldout_error_ledger.csv` (116 rows, one per labelled
+patch). Among 71 truly present patches: 48 are correct on both location and
+membership, 15 have a correct candidate in at least one cache but a wrong
+final location, 4 lack a correct candidate in both caches, 2 are rejected by
+presence despite having a correct candidate, and 2 have the right location
+but the wrong membership bit. Nine of 45 absent patches are false positives.
+Twelve of the 15 location-selection errors are `m=1` graph assignments; in
+eight of those, the right location is top-ranked by at least one matcher.
+Three of four retrieval misses are in the lower half of the query-patch
+signal-to-noise proxy, but the higher-signal half has more overall errors
+(14/36 versus 9/35). Dim-star retrieval deserves a targeted check, while
+patch-to-star assignment and false-positive control are larger measured
+opportunities. Brightness alone cannot separate absent from present patches:
+some absent patches have high center contrast.
+
+### Final graph-assignment rank prior
+
+`joint_geometric_solver.py` now offers `--final-rank-weight` (default `0.0`).
+It adds a small log-rank penalty to candidate costs only for the final dense
+patch-to-star assignment; RANSAC search, identity selection, and candidate
+retrieval are unchanged. The ablation at weight `0.20` used the same caches,
+search settings, and fully scene-held-out downstream classifiers as the strict
+diagnostic above. The three-scene total rose from **0.9038** to **0.9093**;
+patch-specific member F1 rose from **0.471** to **0.529**. Identity remained
+3/3 and set-based geometry remained 1.000. Across 116 labelled patches, five
+categories improved and two regressed; location-selection errors fell from 15
+to 14, false positives from 9 to 8, and correct locations rose from 48 to 50.
+Taurus had no category-level gain. This is a small, mixed diagnostic gain,
+not a validated hidden-label improvement. The existing scored artifact and
+the zero-weight default are unchanged.
+
+The ablation outputs are `outputs/train_heldout_finalrank020_geometry.csv`,
+`outputs/train_heldout_finalrank020_presence.csv`, and
+`outputs/train_heldout_finalrank020_error_ledger.csv`. The validation audit
+does not justify automatic promotion: after the same Gaussian-0.85 refinement
+and established identity gate, the candidate
+`outputs/submission_finalrank020_gated.csv` retains the same nine accepted
+constellation identities and seven complete v4 fallback rows as the scored
+file, but changes **42 patch cells across eight scenes**. Every change touches
+`m=1` ownership: 18 member-to-member relocations, 8 `m=0` to `m=1`, 9 `m=1`
+to `m=0`, 3 absent to `m=1`, and 4 `m=1` to absent. Of the 18 relocations,
+16 move to a better raw candidate rank and two to a worse rank; this is
+expected from the prior but is not proof that the new locations are true.
+Scenes 10 and 11 alone account for 18 changed cells, while scene 02 loses
+one assigned member. The scale of validation reassignment is large relative
+to the five improved and two regressed labelled patches, so this remains an
+**experimental, unscored candidate**; the 0.74973 file remains the recommended
+submission. The new CSV is schema-valid (16 rows, 90 columns), SHA-256
+`9E7CC598AE85D29C94CD102332C59027BEE3A890B37D3591A896759206A8E19C`.
+Do not infer a Kaggle score from the training proxy.
+
+### Fixed-node, two-view ownership refinement
+
+`ownership_audit.py` checks every changed graph-member patch against both the
+raw adaptive and Gaussian-0.85 candidate caches. The earlier rank-prior
+candidate moved 42 member-related cells; among its 18 member-to-member
+relocations, raw ranks improved in 16 and Gaussian ranks improved in 11 (six
+Gaussian matches were absent from the retained list). Scene 11 had strong
+agreement between views, while scene 10 had contradictory evidence and lost
+an assigned member. These ranks are diagnostics, not ground truth.
+
+`ownership_refiner.py` is a narrower experimental alternative. It holds the
+predicted constellation, existing `m=1` query set, and graph-star coordinate
+set fixed; it only uses one-to-one assignment to permute which already-member
+patch owns which existing node. Its cost uses log ranks from both candidate
+views, with a penalty for missing Gaussian support. The optional `--min-gain`
+is the required total cost improvement before any scene-level permutation is
+accepted. No validation truth, scene name, or constellation label enters the
+cost.
+
+On the same scene-held-out three-scene diagnostic, unrestricted two-view
+ownership scored **0.9091** versus the fixed-node input's **0.9038**. An
+exploratory `--min-gain 3.0` gate retained only the Scorpius permutation and
+scored **0.9115**, with localisation 0.726 and patch-specific member F1 0.562
+(input: 0.471). Pisces and Taurus were unchanged; identity remained 3/3 and
+strict geometry 1.000. The gate was chosen during this small diagnostic, so
+this is not an independent validation estimate.
+
+Applying the same gate to the raw validation geometry **before** the
+established identity fallback changes only 10 `m=1` cells, all in scene 11.
+The resulting `outputs/submission_fixednode_ownership_gain3_gated.csv` keeps
+all 16 labels, every membership count, and every graph-star coordinate set
+from the scored 0.74973 file. Seven of the 10 moved patches improve raw rank
+and nine improve Gaussian rank; the remaining ranks are a reason for caution,
+not evidence of hidden correctness. This is a schema-valid, **unscored test
+candidate**, SHA-256
+`29BDE258EAD41B0806F59B017018F6B827D4201DE3B8559577E3DF0B9706B0AA`.
+The scored 0.74973 file remains the default recommendation until Kaggle tests
+the candidate. The diagnostic CSV is
+`outputs/validation_fixednode_ownership_gain3_audit.csv`.
+
+Reproduce the fixed-node candidate from the existing caches in WSL Ubuntu:
+
+```bash
+PY=/opt/constellation-venv/bin/python
+$PY ownership_refiner.py --root . \
+  --input outputs/submission_hybrid_gaussian085_multiwidth.csv \
+  --output outputs/submission_fixednode_ownership_gain3_raw.csv \
+  --split validation --raw-cache outputs/cache_validation_adaptive \
+  --gaussian-cache outputs/cache_validation_gaussian085 --min-gain 3.0
+$PY submission_ensemble.py --root . \
+  --established outputs/submission_v4_presence.csv \
+  --candidate outputs/submission_fixednode_ownership_gain3_raw.csv \
+  --output outputs/submission_fixednode_ownership_gain3_gated.csv
+```
+
+To reproduce the earlier `--final-rank-weight 0.20` candidate from the saved
+validation cache in WSL Ubuntu:
+
+```bash
+PY=/opt/constellation-venv/bin/python
+$PY joint_geometric_solver.py --root . \
+  --config matcher_config_gpu_wide.json \
+  --output outputs/submission_finalrank020_geometry.csv \
+  --split validation --device cpu --top-k 24 --graph-top-k 3 \
+  --proposals 12000 --cache-dir outputs/cache_validation_adaptive \
+  --presence-mode quantile --present-rate 0.625 \
+  --graph-query-factor 2.0 --graph-query-expansion-factor 1.5 \
+  --max-graph-queries 30 --consensus-trials 5 --transform-model affine \
+  --final-rank-weight 0.20
+$PY presence_refiner.py --root . \
+  --input outputs/submission_finalrank020_geometry.csv \
+  --output outputs/submission_finalrank020_gaussian085_presence.csv \
+  --split validation --cache-dir outputs/cache_validation_gaussian085 \
+  --train-cache-dir outputs/cache_train_gaussian085
+$PY submission_ensemble.py --root . \
+  --established outputs/submission_v4_presence.csv \
+  --candidate outputs/submission_finalrank020_gaussian085_presence.csv \
+  --output outputs/submission_finalrank020_gated.csv
+```
+
+Reproduce the held-out diagnostic from existing caches in WSL Ubuntu:
+
+```bash
+PY=/opt/constellation-venv/bin/python
+$PY joint_geometric_solver.py --root . --config matcher_config_gpu_wide.json \
+  --output outputs/train_strict_heldout_geometry.csv --split train --device cpu \
+  --top-k 24 --graph-top-k 3 --proposals 12000 \
+  --cache-dir outputs/cache_train_adaptive --presence-mode quantile \
+  --present-rate 0.625 --graph-query-factor 2.0 \
+  --graph-query-expansion-factor 1.5 --max-graph-queries 30 \
+  --consensus-trials 5 --transform-model affine \
+  --cross-validated-membership
+$PY presence_refiner.py --root . \
+  --input outputs/train_strict_heldout_geometry.csv \
+  --output outputs/train_strict_heldout_gaussian085_presence.csv \
+  --split train --cache-dir outputs/cache_train_gaussian085 \
+  --train-cache-dir outputs/cache_train_gaussian085 --cross-validated
+$PY evaluate.py --root . \
+  --predictions outputs/train_strict_heldout_gaussian085_presence.csv
+$PY error_ledger.py --root . \
+  --predictions outputs/train_strict_heldout_gaussian085_presence.csv \
+  --raw-cache outputs/cache_train_adaptive \
+  --filtered-cache outputs/cache_train_gaussian085 \
+  --output outputs/train_strict_heldout_error_ledger.csv
+```
 
 ## Previous v3 submission
 

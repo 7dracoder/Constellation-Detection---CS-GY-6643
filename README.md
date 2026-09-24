@@ -9,18 +9,31 @@ list its public source and licence.
 ## Current status
 
 The current scored submission is
-[`outputs/submission_v4_presence.csv`](outputs/submission_v4_presence.csv).
-It scored **0.71544** on Kaggle (September 21, 2026), improving v3 by 0.03113.
-The next validated candidate is
-[`outputs/submission_v5_affine_gated.csv`](outputs/submission_v5_affine_gated.csv).
-It has not been scored yet: it uses full-affine refinement on the 12 scenes
-where affine and similarity geometry agree on identity, and retains the entire
-v4 row on the four disagreements so the label and `m=1` coordinates cannot
-describe different patterns.
-A leave-one-scene-out presence pass
-raised the labelled diagnostic from 0.8369 to **0.8709** (loose geometry) and
-from 0.8119 to **0.8459** (strict geometry), while leaving graph-supported
-`m=1` placements and constellation labels unchanged.
+[`outputs/submission_hybrid_gaussian085_multiwidth_gated.csv`](outputs/submission_hybrid_gaussian085_multiwidth_gated.csv).
+It scored **0.74973** on Kaggle (reported September 23, 2026), improving the
+previous Gaussian-hybrid best of 0.73803 by 0.01170 and the earlier
+`submission_v4_presence.csv` score by 0.03429. The pipeline
+uses raw candidates for multi-width affine geometry, matched Gaussian-denoised
+candidates (`sigma=0.85`) for non-member presence/localisation, and retains the
+complete established row when the new and established constellation identities
+disagree. The historical training diagnostic was **0.9014** strict and loose,
+with 3/3 identities. That run held out each scene from presence training but
+not from membership training; see the corrected evaluation below.
+
+For the final three daily submission slots, see the September 24 triage in
+[PROJECT_STATUS.md](PROJECT_STATUS.md). Two unscored, schema-valid alternatives
+are `outputs/submission_scene01_15_hydra.csv` (two complete course-data
+geometry rows with strong independent catalog corroboration) and
+`outputs/submission_fusion085_065_t54_rate15_gated.csv` (14 bounded
+nonmember additions). A combined file is also ready; keep a slot to decide
+on it after the first two scores. The scored 0.74973 CSV remains untouched.
+
+A controlled labelled sweep found `sigma=0.85` tied `sigma=0.65` at 58/71
+top-1 and 67/71 retained candidate recall, but improved the complete
+leave-one-scene-out diagnostic from 0.8993 to **0.9014**. It uses the same raw
+geometry and identity gate as the scored file; only non-member (`m=0`)
+presence/localisation changes. Kaggle confirmed the improvement with a gain
+of 0.01170 over the `sigma=0.65` submission.
 
 | Submission | Kaggle |
 | --- | ---: |
@@ -29,23 +42,56 @@ from 0.8119 to **0.8459** (strict geometry), while leaving graph-supported
 | A100 wide search | 0.66890 |
 | Local RTX 5070 Ti rebuild | 0.68196 |
 | Assignment-robustness pass | 0.68431 |
-| Presence-refined pass | **0.71544** |
+| Presence-refined pass | 0.71544 |
+| Gaussian σ=0.65 hybrid + multi-width identity gate | 0.73803 |
+| Gaussian σ=0.85 hybrid + same identity gate | **0.74973** |
 | Affine-gated candidate | not submitted |
 | Teammate graphguard (v6) | 0.70102 (not promoted) |
 
-Candidate localisation is unchanged across all three GPU runs; the gains came
-from the geometry, scoring, and calibration stages.  The largest single
-defect fixed in the rebuild was RANSAC under-sampling: at the previous
-default of 6000 proposals the true pattern's support on a labelled scene
-varied between 6 and 9 across seeds, so constellation identity was partly
-decided by sampling luck.  The assignment-robustness pass then audited the
-solver for other hard-coded assumptions tuned on the same three labelled
-scenes and fixed the ones that could not have been exercised by them (a
-RANSAC search-time filter, and single-seed dependence in the final pattern
-choice); it also tested a margin-weighting idea, found it did not help, and
-shipped it disabled rather than assumed beneficial.  See
-[PROJECT_STATUS.md](PROJECT_STATUS.md) for the details.  The +0.00235 gain
-is small and consistent with 11 of 16 validation labels being unchanged.
+Matched Gaussian denoising produced the first material candidate-localisation
+gain: labelled top-1 recall rose from 49/71 to 58/71 and retained-list recall
+from 63/71 to 67/71, with no retained-location losses. Applying the denoised
+cache to geometry itself was worse; the successful hybrid keeps raw
+multi-width geometry and uses denoised evidence only for non-member
+presence/localisation. See [PROJECT_STATUS.md](PROJECT_STATUS.md) and
+[LOCAL_STAR_BANK.md](LOCAL_STAR_BANK.md) for the ablations and commands.
+
+The labelled Gaussian-strength sweep was: raw 49/71 top-1 and 63/71 retained;
+`sigma=0.45` 54/71 and 65/71; `sigma=0.65` 58/71 and 67/71; and `sigma=0.85`
+58/71 and 67/71. Although the last two tie on recall, `sigma=0.85` gave better
+presence/localisation in the end-to-end diagnostic (0.9014 versus 0.8993).
+
+A later two-cache confidence-fusion experiment is implemented but not
+promoted. Although a threshold of 0.54 reached 0.9034 on the three labelled
+scenes, it added 44 validation detections relative to the 0.74973 file after
+changing only one labelled patch. That distribution shift is too large to
+justify submission; retain the single-cache `sigma=0.85` baseline.
+
+An optional final graph-assignment rank prior improved a fully scene-held-out
+three-scene diagnostic from 0.9038 to 0.9093 and patch-specific member F1
+from 0.471 to 0.529. Its gated validation artifact changes 42 `m=1`-related
+cells across eight scenes, however, so it is an unscored experiment, not a
+replacement for the 0.74973 submission. See [PROJECT_STATUS.md](PROJECT_STATUS.md)
+for the audit and reproduction commands; the default rank weight remains zero.
+
+A narrower two-view ownership experiment keeps the selected figure-star set
+and membership count fixed, changing only which member patch owns each star.
+Its exploratory evidence gate raised the same three-scene proxy to 0.9115
+and changes only 10 validation cells, all in scene 11. The file
+`outputs/submission_fixednode_ownership_gain3_gated.csv` is valid but unscored;
+the 0.74973 submission remains the established choice.
+
+The corrected three-fold train evaluation now excludes each predicted scene
+from both membership and presence training. With the existing candidate caches
+and fixed search settings it scores **0.9038** strict/loose, but the new
+patch-specific member F1 is only **0.471**, despite a set-based geometry score
+of 1.000. Its [error ledger](outputs/train_strict_heldout_error_ledger.csv)
+finds 15 wrong final locations where a true candidate was available, compared
+with four real patches missing from both candidate lists. Twelve of those
+15 wrong locations are graph-member assignments. The next target is
+patch-to-star assignment, not a stronger global blur. These settings were
+previously selected using the same three scenes, so the fold score remains a
+regression diagnostic rather than an unbiased estimate of Kaggle performance.
 
 None of this is evidence of a guaranteed future score.  See
 [PROJECT_STATUS.md](PROJECT_STATUS.md) for the full experiment record, method,

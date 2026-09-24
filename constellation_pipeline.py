@@ -57,6 +57,11 @@ class MatcherConfig:
     # The threshold is learned from train labels by the calibrate command.
     presence_threshold: float = 0.46
     margin_threshold: float = 0.00
+    # Optional matched denoising applied to both the scene and query before
+    # template matching.  The default preserves the established raw path.
+    denoise_method: str = "none"
+    denoise_sigma: float = 0.0
+    denoise_kernel: int = 3
 
 
 def read_grayscale(path: Path) -> np.ndarray:
@@ -64,6 +69,23 @@ def read_grayscale(path: Path) -> np.ndarray:
     if image is None:
         raise FileNotFoundError(f"Could not read image: {path}")
     return image.astype(np.float32)
+
+
+def denoise_for_matching(image: np.ndarray, config: MatcherConfig) -> np.ndarray:
+    """Apply the same conservative denoiser to a scene and its query patches."""
+    method = config.denoise_method.lower()
+    if method == "none":
+        return image
+    if method == "gaussian":
+        if config.denoise_sigma <= 0.0:
+            raise ValueError("Gaussian denoising requires denoise_sigma > 0")
+        return cv2.GaussianBlur(image, (0, 0), config.denoise_sigma).astype(np.float32)
+    if method == "median":
+        kernel = int(config.denoise_kernel)
+        if kernel < 3 or kernel % 2 == 0:
+            raise ValueError("Median denoising requires an odd denoise_kernel >= 3")
+        return cv2.medianBlur(image, kernel).astype(np.float32)
+    raise ValueError(f"Unknown denoise_method: {config.denoise_method!r}")
 
 
 def parse_cell(value: str) -> Optional[tuple[int, int, int]]:
@@ -232,8 +254,9 @@ class SceneMatcher:
     def __init__(self, image_path: Path, config: MatcherConfig):
         self.config = config
         self.image = read_grayscale(image_path)
+        self.matching_image = denoise_for_matching(self.image, config)
         self.padded_image = cv2.copyMakeBorder(
-            self.image,
+            self.matching_image,
             PATCH_RADIUS,
             PATCH_RADIUS,
             PATCH_RADIUS,
@@ -242,7 +265,9 @@ class SceneMatcher:
         )
         height, width = self.image.shape
         self.coarse_shape = (width // config.coarse_factor, height // config.coarse_factor)
-        self.coarse_image = cv2.resize(self.image, self.coarse_shape, interpolation=cv2.INTER_AREA)
+        self.coarse_image = cv2.resize(
+            self.matching_image, self.coarse_shape, interpolation=cv2.INTER_AREA
+        )
         self.last_candidate_count = 0
 
     def _query_variants(self, query: np.ndarray) -> tuple[np.ndarray, list[tuple[float, float]]]:
@@ -330,7 +355,7 @@ class SceneMatcher:
         to resolve those ambiguities.  Candidates are still computed solely
         from the query patch and its own scene.
         """
-        query = read_grayscale(query_path)
+        query = denoise_for_matching(read_grayscale(query_path), self.config)
         if query.shape != (PATCH_SIZE, PATCH_SIZE):
             raise ValueError(f"Unexpected patch shape {query.shape} in {query_path}")
         if limit < 1:

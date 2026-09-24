@@ -62,6 +62,7 @@ from joint_geometric_solver import (
     GraphFit,
     assign_to_mapped,
     choose_fit,
+    graph_query_targets,
     membership_probabilities,
     presence_cutoff,
     scene_candidates,
@@ -93,7 +94,10 @@ class SceneFits:
     row: dict[str, str]
     active: list[str]
     candidates_by_query: list[list[Candidate]]
-    selected_queries: list[int]
+    # Each retained fit may have won at a different query-cloud width.  Keep
+    # the matching shortlist so final coordinate assignment uses the same
+    # evidence that produced that fit.
+    selected_queries_by_pattern: dict[str, list[int]]
     cutoff: float
     present_count: int
     # Ranked, de-duplicated pattern fits (best first).  Each is a full GraphFit
@@ -109,6 +113,9 @@ class SceneFits:
             if fit.pattern.name == pattern_name:
                 return fit
         return None
+
+    def selected_queries_for(self, pattern_name: str) -> list[int]:
+        return self.selected_queries_by_pattern.get(pattern_name, [])
 
 
 def collect_ranked_fits(
@@ -167,6 +174,7 @@ def gather_scene_fits(
     present_rate: float,
     figure_rate: float,
     graph_query_factor: float,
+    graph_query_expansion_factor: float,
     min_graph_queries: int,
     max_graph_queries: int,
     consensus_trials: int,
@@ -194,32 +202,52 @@ def gather_scene_fits(
     cutoff = presence_cutoff(direct_scores, presence_mode, config, present_rate)
     present_count = int(np.sum(direct_scores >= cutoff))
     expected_figure = max(4.0, figure_rate * present_count)
-    target = int(
-        np.clip(round(graph_query_factor * expected_figure), min_graph_queries, max_graph_queries)
-    )
     order = np.argsort(probabilities)[::-1]
-    selected_queries = sorted(int(index) for index in order[: min(target, len(active))])
-
-    fit_candidates = [
-        item
-        for query in selected_queries
-        for item in candidates_by_query[query][: max(1, graph_top_k)]
-    ]
-    context = FitContext(len(fit_candidates), image_area, expected_figure)
-    ranked_fits = collect_ranked_fits(
-        patterns,
-        fit_candidates,
-        proposals,
-        seed,
-        context,
-        consensus_trials,
-        transform_model,
-        FITS_PER_SCENE,
+    targets = graph_query_targets(
+        expected_figure,
+        graph_query_factor,
+        graph_query_expansion_factor,
+        min_graph_queries,
+        max_graph_queries,
+        len(active),
     )
+    best_by_pattern: dict[str, GraphFit] = {}
+    selected_queries_by_pattern: dict[str, list[int]] = {}
+    cloud_sizes: list[int] = []
+    for width_index, target in enumerate(targets):
+        selected_queries = sorted(int(index) for index in order[:target])
+        fit_candidates = [
+            item
+            for query in selected_queries
+            for item in candidates_by_query[query][: max(1, graph_top_k)]
+        ]
+        cloud_sizes.append(len(fit_candidates))
+        context = FitContext(len(fit_candidates), image_area, expected_figure)
+        width_fits = collect_ranked_fits(
+            patterns,
+            fit_candidates,
+            proposals,
+            seed + 104_729 * width_index,
+            context,
+            consensus_trials,
+            transform_model,
+            FITS_PER_SCENE,
+        )
+        for fit in width_fits:
+            current = best_by_pattern.get(fit.pattern.name)
+            if current is None or fit.quality > current.quality:
+                best_by_pattern[fit.pattern.name] = fit
+                selected_queries_by_pattern[fit.pattern.name] = selected_queries
+    ranked_fits = sorted(best_by_pattern.values(), key=lambda fit: fit.quality, reverse=True)[
+        :FITS_PER_SCENE
+    ]
+    selected_queries_by_pattern = {
+        fit.pattern.name: selected_queries_by_pattern[fit.pattern.name] for fit in ranked_fits
+    }
     print(
         f"{scene}: ranked "
         + ", ".join(f"{fit.pattern.name}(q={fit.quality:.2f},s={fit.support})" for fit in ranked_fits[:4])
-        + f" present={present_count}/{len(active)} cloud={len(fit_candidates)}",
+        + f" present={present_count}/{len(active)} widths={list(targets)} clouds={cloud_sizes}",
         flush=True,
     )
     return SceneFits(
@@ -227,7 +255,7 @@ def gather_scene_fits(
         row=row,
         active=active,
         candidates_by_query=candidates_by_query,
-        selected_queries=selected_queries,
+        selected_queries_by_pattern=selected_queries_by_pattern,
         cutoff=cutoff,
         present_count=present_count,
         ranked_fits=ranked_fits,
@@ -316,7 +344,8 @@ def realise_row(sf: SceneFits, chosen_pattern: str) -> dict[str, str]:
     fit = sf.fit_for(chosen_pattern)
     graph_assignments: dict[int, Candidate] = {}
     if fit is not None and fit.support >= 4:
-        dense = [item for query in sf.selected_queries for item in sf.candidates_by_query[query]]
+        selected_queries = sf.selected_queries_for(chosen_pattern)
+        dense = [item for query in selected_queries for item in sf.candidates_by_query[query]]
         graph_assignments = assign_to_mapped(fit.mapped_points, dense, fit.tolerance)
         if len(graph_assignments) < fit.support:
             graph_assignments = fit.assignments
@@ -328,9 +357,13 @@ def realise_row(sf: SceneFits, chosen_pattern: str) -> dict[str, str]:
         direct = sf.candidates_by_query[query_index][0]
         if query_index in graph_assignments:
             point = graph_assignments[query_index]
-            row[column] = format_cell(Prediction(point.x, point.y, m=1, score=point.score))
+            row[column] = format_cell(
+                Prediction(int(round(point.x)), int(round(point.y)), m=1, score=point.score)
+            )
         elif direct.score >= sf.cutoff:
-            row[column] = format_cell(Prediction(direct.x, direct.y, m=0, score=direct.score))
+            row[column] = format_cell(
+                Prediction(int(round(direct.x)), int(round(direct.y)), m=0, score=direct.score)
+            )
         else:
             row[column] = "-1"
     assigned_count = len(graph_assignments)
@@ -397,6 +430,7 @@ def write_predictions(root: Path, split: str, output: Path, args) -> None:
                 args.present_rate,
                 args.figure_rate,
                 args.graph_query_factor,
+                args.graph_query_expansion_factor,
                 args.min_graph_queries,
                 args.max_graph_queries,
                 args.consensus_trials,
@@ -447,6 +481,12 @@ def main() -> None:
     parser.add_argument("--present-rate", type=float, default=0.625)
     parser.add_argument("--figure-rate", type=float, default=0.355)
     parser.add_argument("--graph-query-factor", type=float, default=2.0)
+    parser.add_argument(
+        "--graph-query-expansion-factor",
+        type=float,
+        default=1.0,
+        help="Also evaluate a broader membership shortlist; 1.0 preserves one width",
+    )
     parser.add_argument("--min-graph-queries", type=int, default=12)
     parser.add_argument("--max-graph-queries", type=int, default=30)
     parser.add_argument("--consensus-trials", type=int, default=5)
@@ -467,6 +507,8 @@ def main() -> None:
         parser.error("--top-k must be at least 2")
     if args.graph_top_k < 1 or args.graph_top_k > args.top_k:
         parser.error("--graph-top-k must be between 1 and --top-k")
+    if args.graph_query_expansion_factor < 1.0:
+        parser.error("--graph-query-expansion-factor must be at least 1.0")
     write_predictions(args.root.resolve(), args.split, args.output.resolve(), args)
 
 

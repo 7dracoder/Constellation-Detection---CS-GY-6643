@@ -9,8 +9,10 @@ post-processes an existing solver CSV:
 
 * graph-supported ``m=1`` predictions are preserved exactly;
 * other patches are marked present when the learned model clears its
-  cross-validated threshold; and
-* newly present non-members use the raw matcher's top-ranked location.
+  cross-validated threshold;
+* one or more matched-filter candidate caches can be fused, including their
+  cross-filter location agreement; and
+* newly present non-members use the first cache's top-ranked location.
 
 No scene name, external image, external label, or pretrained model is used as
 a prediction feature.
@@ -75,30 +77,18 @@ def load_candidate_cache(path: Path, columns: list[str]) -> dict:
     return saved
 
 
-def scene_features(
-    root: Path,
-    split: str,
-    scene: str,
-    columns: list[str],
-    cache_dir: Path,
-) -> tuple[np.ndarray, dict]:
-    saved = load_candidate_cache(cache_dir / f"{scene}.json", columns)
-    score_matrix = np.asarray(
-        [[float(item[2]) for item in group[:16]] for group in saved["candidates"]],
-        dtype=np.float32,
-    )
+def _cache_dirs(value: Path | list[Path] | tuple[Path, ...]) -> list[Path]:
+    """Normalize the legacy single-cache and new multi-cache APIs."""
+    return [value] if isinstance(value, Path) else list(value)
+
+
+def _score_features(score_matrix: np.ndarray) -> np.ndarray:
+    """Per-query rank and separation features for one matcher view."""
     top = score_matrix[:, 0]
     ranks = percentile_ranks(top)
     zscore = (top - top.mean()) / (top.std() + 1e-6)
-    values: list[np.ndarray] = []
-    for index, column in enumerate(columns):
-        patch = cv2.imread(
-            str(root / split / scene / "patches" / f"{column}.png"),
-            cv2.IMREAD_GRAYSCALE,
-        )
-        if patch is None:
-            raise FileNotFoundError(f"Could not read {split}/{scene}/{column}.png")
-        scores = score_matrix[index]
+    values = []
+    for index, scores in enumerate(score_matrix):
         values.append(
             np.concatenate(
                 (
@@ -114,11 +104,76 @@ def scene_features(
                         ),
                         dtype=np.float32,
                     ),
-                    patch_features(patch),
                 )
             )
         )
-    return np.stack(values).astype(np.float32), saved
+    return np.stack(values).astype(np.float32)
+
+
+def _agreement_features(saved_views: list[dict], query_index: int) -> np.ndarray:
+    """Measure whether independently filtered views retrieve the same place.
+
+    Features are pairwise and symmetric apart from the two nearest-list
+    distances.  They use coordinates and ranks only; no scene identity or
+    validation label enters the fusion model.
+    """
+    values: list[float] = []
+    for left_index in range(len(saved_views)):
+        left = np.asarray(saved_views[left_index]["candidates"][query_index][:16], dtype=np.float32)
+        for right_index in range(left_index + 1, len(saved_views)):
+            right = np.asarray(saved_views[right_index]["candidates"][query_index][:16], dtype=np.float32)
+            left_xy, right_xy = left[:, :2], right[:, :2]
+            top_distance = float(np.linalg.norm(left_xy[0] - right_xy[0]))
+            left_to_right = float(np.linalg.norm(right_xy - left_xy[0], axis=1).min())
+            right_to_left = float(np.linalg.norm(left_xy - right_xy[0], axis=1).min())
+            score_delta = float(left[0, 2] - right[0, 2])
+            values.extend(
+                (
+                    top_distance,
+                    left_to_right,
+                    right_to_left,
+                    score_delta,
+                    abs(score_delta),
+                    float(top_distance <= 12.0),
+                )
+            )
+    return np.asarray(values, dtype=np.float32)
+
+
+def scene_features(
+    root: Path,
+    split: str,
+    scene: str,
+    columns: list[str],
+    cache_dir: Path | list[Path] | tuple[Path, ...],
+) -> tuple[np.ndarray, list[dict]]:
+    cache_dirs = _cache_dirs(cache_dir)
+    if not cache_dirs:
+        raise ValueError("At least one candidate cache is required")
+    saved_views = [
+        load_candidate_cache(directory / f"{scene}.json", columns) for directory in cache_dirs
+    ]
+    score_features = []
+    for saved in saved_views:
+        score_matrix = np.asarray(
+            [[float(item[2]) for item in group[:16]] for group in saved["candidates"]],
+            dtype=np.float32,
+        )
+        score_features.append(_score_features(score_matrix))
+    values: list[np.ndarray] = []
+    for index, column in enumerate(columns):
+        patch = cv2.imread(
+            str(root / split / scene / "patches" / f"{column}.png"),
+            cv2.IMREAD_GRAYSCALE,
+        )
+        if patch is None:
+            raise FileNotFoundError(f"Could not read {split}/{scene}/{column}.png")
+        parts = [features[index] for features in score_features]
+        if len(saved_views) > 1:
+            parts.append(_agreement_features(saved_views, index))
+        parts.append(patch_features(patch))
+        values.append(np.concatenate(parts))
+    return np.stack(values).astype(np.float32), saved_views
 
 
 def fit_classifier(
@@ -144,7 +199,7 @@ def fit_classifier(
 
 def train_classifier(
     root: Path,
-    cache_dir: Path,
+    cache_dir: Path | list[Path] | tuple[Path, ...],
     regularization: float = DEFAULT_REGULARIZATION,
     threshold: float = DEFAULT_THRESHOLD,
     excluded_scene: str | None = None,
@@ -171,8 +226,8 @@ def refine_rows(
     root: Path,
     split: str,
     rows: list[dict[str, str]],
-    cache_dir: Path,
-    train_cache_dir: Path,
+    cache_dir: Path | list[Path] | tuple[Path, ...],
+    train_cache_dir: Path | list[Path] | tuple[Path, ...],
     regularization: float,
     threshold: float,
     cross_validated: bool,
@@ -185,7 +240,7 @@ def refine_rows(
         row = source_row.copy()
         scene = row["Id"]
         columns = patch_columns(int(row["n_patches"]))
-        features, saved = scene_features(root, split, scene, columns, cache_dir)
+        features, saved_views = scene_features(root, split, scene, columns, cache_dir)
         model = shared_model or train_classifier(
             root, train_cache_dir, regularization, threshold, excluded_scene=scene
         )
@@ -195,7 +250,9 @@ def refine_rows(
             if current is not None and current[2] == 1:
                 continue
             if probabilities[index] >= model.threshold:
-                best = saved["candidates"][index][0]
+                # Cache order is deliberate: the first view supplies final
+                # coordinates while every view contributes confidence.
+                best = saved_views[0]["candidates"][index][0]
                 row[column] = format_cell(
                     Prediction(x=int(best[0]), y=int(best[1]), m=0, score=float(best[2]))
                 )
@@ -211,8 +268,20 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--split", choices=("train", "validation"), default="validation")
-    parser.add_argument("--cache-dir", type=Path, required=True)
-    parser.add_argument("--train-cache-dir", type=Path, required=True)
+    parser.add_argument(
+        "--cache-dir",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="One or more prediction caches; the first supplies final coordinates",
+    )
+    parser.add_argument(
+        "--train-cache-dir",
+        type=Path,
+        nargs="+",
+        required=True,
+        help="Training caches in the same view order as --cache-dir",
+    )
     parser.add_argument("--regularization", type=float, default=DEFAULT_REGULARIZATION)
     parser.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD)
     parser.add_argument(
@@ -229,8 +298,8 @@ def main() -> None:
         root,
         args.split,
         rows,
-        args.cache_dir.resolve(),
-        args.train_cache_dir.resolve(),
+        [path.resolve() for path in args.cache_dir],
+        [path.resolve() for path in args.train_cache_dir],
         args.regularization,
         args.threshold,
         args.cross_validated,

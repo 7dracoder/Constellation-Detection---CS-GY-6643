@@ -72,10 +72,15 @@ def fit_rows(
     rows: list[dict[str, str]],
     patterns: list[Pattern],
     proposals: int,
+    only_scene: str | None = None,
+    seed_offset: int = 0,
+    transform_model: str = "affine",
 ) -> None:
     recovered = 0
     scored = 0
     for scene_index, row in enumerate(rows):
+        if only_scene and row["Id"] != only_scene:
+            continue
         scene = row["Id"]
         candidates: list[Candidate] = []
         for query_index, column in enumerate(patch_columns(int(row["n_patches"]))):
@@ -92,9 +97,9 @@ def fit_rows(
             patterns,
             candidates,
             proposals,
-            91_003 + scene_index,
+            91_003 + scene_index + seed_offset,
             context,
-            transform_model="affine",
+            transform_model=transform_model,
         )
         best_text = "none" if best is None else f"{best.pattern.name} support={best.support} q={best.quality:.2f}"
         runner_text = (
@@ -115,13 +120,19 @@ def main() -> None:
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--split", choices=("train", "validation"), default="validation")
     parser.add_argument("--proposals", type=int, default=12_000)
+    parser.add_argument("--scene", help="Optionally audit only one scene ID")
+    parser.add_argument("--seed-offset", type=int, default=0)
+    parser.add_argument("--transform-model", choices=("similarity", "affine"), default="affine")
     args = parser.parse_args()
     root = args.root.resolve()
     patterns = load_d3_patterns(root, args.catalog_root.resolve())
     if not patterns:
         raise ValueError("No d3-celestial patterns matched the competition names")
     print(f"loaded {len(patterns)} independent catalog patterns")
-    fit_rows(root, args.split, read_csv_rows(args.input.resolve()), patterns, args.proposals)
+    rows = read_csv_rows(args.input.resolve())
+    if args.scene and not any(row["Id"] == args.scene for row in rows):
+        raise ValueError(f"Scene not found: {args.scene}")
+    fit_rows(root, args.split, rows, patterns, args.proposals, args.scene, args.seed_offset, args.transform_model)
 
 
 if __name__ == "__main__":

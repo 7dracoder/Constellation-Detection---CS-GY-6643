@@ -84,8 +84,8 @@ TOLERANCE_MAX = 45.0
 @dataclass(frozen=True)
 class Candidate:
     query_index: int
-    x: int
-    y: int
+    x: float
+    y: float
     score: float
     # Gap between this candidate's own match score and the next-best score at
     # the SAME rank in its query's shortlist (0.0 when unknown, e.g. a cache
@@ -370,7 +370,10 @@ def _rank_normalize(values: np.ndarray) -> np.ndarray:
 
 
 def assignment_costs(
-    mapped: np.ndarray, candidates: list[Candidate], tolerance: float
+    mapped: np.ndarray,
+    candidates: list[Candidate],
+    tolerance: float,
+    rank_weight: float = 0.0,
 ) -> tuple[np.ndarray, np.ndarray, list[int]]:
     """Build the one-to-one assignment cost matrix shared by every caller.
 
@@ -401,16 +404,25 @@ def assignment_costs(
     if not query_ids:
         return costs, chosen, query_ids
     query_to_column = {query: column for column, query in enumerate(query_ids)}
+    if rank_weight < 0.0:
+        raise ValueError("rank_weight must be nonnegative")
+    ranks: dict[int, int] = {}
     score_values = np.asarray([item.score for item in candidates], dtype=np.float32)
     score_floor, score_span = float(score_values.min()), float(np.ptp(score_values) + 1e-5)
     margin_rank = _rank_normalize(np.asarray([item.margin for item in candidates], dtype=np.float32))
     for candidate_index, candidate in enumerate(candidates):
         column = query_to_column[candidate.query_index]
+        rank = ranks.get(candidate.query_index, 0)
+        ranks[candidate.query_index] = rank + 1
         distance = np.linalg.norm(mapped - np.asarray((candidate.x, candidate.y), np.float32), axis=1)
         confidence = ASSIGNMENT_SCORE_WEIGHT * (candidate.score - score_floor) / score_span + (
             ASSIGNMENT_MARGIN_WEIGHT * margin_rank[candidate_index]
         )
-        value = distance / tolerance - confidence
+        # The candidate list is ordered best-first within each query.  Apply
+        # this optional prior only when placing stars after a pattern and
+        # transform have already won; RANSAC fitting remains unchanged.
+        rank_penalty = rank_weight * math.log1p(rank) / math.log1p(15)
+        value = distance / tolerance - confidence + rank_penalty
         better = (distance <= tolerance) & (value < costs[:, column])
         costs[better, column] = value[better]
         chosen[better, column] = candidate_index
@@ -418,7 +430,10 @@ def assignment_costs(
 
 
 def assign_with_nodes(
-    mapped: np.ndarray, candidates: list[Candidate], tolerance: float
+    mapped: np.ndarray,
+    candidates: list[Candidate],
+    tolerance: float,
+    rank_weight: float = 0.0,
 ) -> tuple[dict[int, int], dict[int, Candidate]]:
     """Hungarian assignment that also reports which node each query filled.
 
@@ -426,7 +441,7 @@ def assign_with_nodes(
     (``source_points[node]`` pairs with ``assignments[query]``); callers that
     only need the placed points use :func:`assign_to_mapped` instead.
     """
-    costs, chosen, query_ids = assignment_costs(mapped, candidates, tolerance)
+    costs, chosen, query_ids = assignment_costs(mapped, candidates, tolerance, rank_weight)
     if not query_ids:
         return {}, {}
     dummy = np.full((len(mapped), len(mapped)), ASSIGNMENT_DUMMY_COST, dtype=np.float32)
@@ -443,7 +458,10 @@ def assign_with_nodes(
 
 
 def assign_to_mapped(
-    mapped: np.ndarray, candidates: list[Candidate], tolerance: float
+    mapped: np.ndarray,
+    candidates: list[Candidate],
+    tolerance: float,
+    rank_weight: float = 0.0,
 ) -> dict[int, Candidate]:
     """One-to-one Hungarian assignment of query patches onto mapped nodes.
 
@@ -451,7 +469,7 @@ def assign_to_mapped(
     and transform have already been chosen from a sparse one; see
     ``assign_with_nodes`` when the caller also needs to refit the transform.
     """
-    _, assignments = assign_with_nodes(mapped, candidates, tolerance)
+    _, assignments = assign_with_nodes(mapped, candidates, tolerance, rank_weight)
     return assignments
 
 
@@ -725,7 +743,7 @@ def scene_candidates(
             # It never fabricates a value that would look like real evidence.
             return [
                 [
-                    Candidate(query_index=index, x=int(row[0]), y=int(row[1]), score=float(row[2]),
+                    Candidate(query_index=index, x=float(row[0]), y=float(row[1]), score=float(row[2]),
                               margin=float(row[3]) if len(row) > 3 else 0.0)
                     for row in group
                 ]
@@ -792,6 +810,20 @@ def presence_cutoff(scores: np.ndarray, mode: str, config: MatcherConfig, presen
     return float(ordered[min(keep, len(ordered)) - 1])
 
 
+def graph_query_targets(
+    expected_figure: float,
+    graph_query_factor: float,
+    expansion_factor: float,
+    minimum: int,
+    maximum: int,
+    available: int,
+) -> tuple[int, ...]:
+    """Return unique narrow/broad membership shortlist sizes."""
+    base = int(np.clip(round(graph_query_factor * expected_figure), minimum, maximum))
+    expanded = int(np.clip(round(base * expansion_factor), minimum, maximum))
+    return tuple(dict.fromkeys((min(base, available), min(expanded, available))))
+
+
 def predict_row(
     root: Path,
     split: str,
@@ -810,10 +842,12 @@ def predict_row(
     present_rate: float,
     figure_rate: float,
     graph_query_factor: float,
+    graph_query_expansion_factor: float,
     min_graph_queries: int,
     max_graph_queries: int,
     consensus_trials: int,
     transform_model: str,
+    final_rank_weight: float = 0.0,
 ) -> dict[str, str]:
     scene = row["Id"]
     active = patch_columns(int(row["n_patches"]))
@@ -846,31 +880,73 @@ def predict_row(
     # every pattern looks like a coincidence.  Taking a scene-adaptive number
     # of the most figure-like queries keeps the cloud in the range the
     # labelled scenes exercised, whatever the probabilities happen to be.
-    target = int(
-        np.clip(round(graph_query_factor * expected_figure), min_graph_queries, max_graph_queries)
-    )
     order = np.argsort(probabilities)[::-1]
-    selected_queries = sorted(int(index) for index in order[: min(target, len(active))])
-
-    # Fit the graph on a deliberately sparse, high-precision cloud.  Support
-    # earned by coincidence grows with candidate density: on the labelled
-    # scenes the true pattern stays rank 1 against ~50 points but falls to
-    # rank 4 against ~110, and the full top-16 cloud is 336-1392 points.
-    fit_candidates = [
-        item
-        for query in selected_queries
-        for item in candidates_by_query[query][: max(1, graph_top_k)]
-    ]
-    context = FitContext(len(fit_candidates), image_area, expected_figure)
-    best, runner = choose_fit_consensus(
-        patterns,
-        fit_candidates,
-        proposals,
-        seed,
-        context,
-        consensus_trials,
-        transform_model,
+    targets = graph_query_targets(
+        expected_figure,
+        graph_query_factor,
+        graph_query_expansion_factor,
+        min_graph_queries,
+        max_graph_queries,
+        len(active),
     )
+    base_target = targets[0]
+
+    # A single membership width creates a brittle precision/recall choice:
+    # the narrow cloud suppresses coincidences but can omit a real dim figure
+    # patch, while a wider cloud can recover it at the cost of more accidental
+    # alignments.  Search both widths and compare them with GraphFit.quality,
+    # whose binomial significance term explicitly accounts for cloud density.
+    # This is scene-agnostic and label-free; a factor of 1.0 preserves the
+    # original single-width behavior exactly.
+    width_results: list[
+        tuple[GraphFit, Optional[GraphFit], list[int], list[Candidate], FitContext]
+    ] = []
+    for width_index, target in enumerate(targets):
+        selected = sorted(int(index) for index in order[: min(target, len(active))])
+
+        # Fit the graph on a deliberately sparse, high-precision cloud.
+        fit_cloud = [
+            item
+            for query in selected
+            for item in candidates_by_query[query][: max(1, graph_top_k)]
+        ]
+        fit_context = FitContext(len(fit_cloud), image_area, expected_figure)
+        width_best, width_runner = choose_fit_consensus(
+            patterns,
+            fit_cloud,
+            proposals,
+            seed + 104_729 * width_index,
+            fit_context,
+            consensus_trials,
+            transform_model,
+        )
+        if width_best is not None:
+            width_results.append(
+                (width_best, width_runner, selected, fit_cloud, fit_context)
+            )
+
+    if width_results:
+        best, runner, selected_queries, fit_candidates, context = max(
+            width_results, key=lambda result: result[0].quality
+        )
+        other_fits = [
+            fit
+            for width_best, width_runner, _, _, _ in width_results
+            for fit in (width_best, width_runner)
+            if fit is not None and fit.pattern.name != best.pattern.name
+        ]
+        runner = max(other_fits, key=lambda fit: fit.quality, default=runner)
+    else:
+        best = runner = None
+        selected_queries = sorted(
+            int(index) for index in order[: min(base_target, len(active))]
+        )
+        fit_candidates = [
+            item
+            for query in selected_queries
+            for item in candidates_by_query[query][: max(1, graph_top_k)]
+        ]
+        context = FitContext(len(fit_candidates), image_area, expected_figure)
 
     graph_assignments: dict[int, Candidate] = {}
     if best is not None and best.support >= 4:
@@ -878,7 +954,9 @@ def predict_row(
         # one-to-one assignment against every retained candidate so a figure
         # star whose best location sat outside the sparse cloud is recovered.
         dense = [item for query in selected_queries for item in candidates_by_query[query]]
-        graph_assignments = assign_to_mapped(best.mapped_points, dense, best.tolerance)
+        graph_assignments = assign_to_mapped(
+            best.mapped_points, dense, best.tolerance, rank_weight=final_rank_weight
+        )
         if len(graph_assignments) < best.support:
             graph_assignments = best.assignments
         row["constellation"] = best.pattern.name
@@ -889,9 +967,13 @@ def predict_row(
         direct = candidates_by_query[query_index][0]
         if query_index in graph_assignments:
             point = graph_assignments[query_index]
-            row[column] = format_cell(Prediction(point.x, point.y, m=1, score=point.score))
+            row[column] = format_cell(
+                Prediction(int(round(point.x)), int(round(point.y)), m=1, score=point.score)
+            )
         elif direct.score >= cutoff:
-            row[column] = format_cell(Prediction(direct.x, direct.y, m=0, score=direct.score))
+            row[column] = format_cell(
+                Prediction(int(round(direct.x)), int(round(direct.y)), m=0, score=direct.score)
+            )
         else:
             row[column] = "-1"
     error_text = f"{best.mean_error:.1f}" if best is not None else "n/a"
@@ -903,7 +985,8 @@ def predict_row(
     print(
         f"{scene}: {row['constellation']} support={best.support if best else 0} "
         f"assigned={len(graph_assignments)} error={error_text} {detail} "
-        f"present={present_count}/{len(active)} cloud={len(fit_candidates)} "
+        f"present={present_count}/{len(active)} queries={len(selected_queries)} "
+        f"cloud={len(fit_candidates)} "
         f"runner={runner.pattern.name if runner else 'none'}",
         flush=True,
     )
@@ -943,23 +1026,33 @@ def write_predictions(
     present_rate: float,
     figure_rate: float,
     graph_query_factor: float,
+    graph_query_expansion_factor: float,
     min_graph_queries: int,
     max_graph_queries: int,
     consensus_trials: int,
     transform_model: str,
+    cross_validated_membership: bool = False,
+    final_rank_weight: float = 0.0,
 ) -> None:
+    if cross_validated_membership and split != "train":
+        raise ValueError("Cross-validated membership is only valid for the train split")
     patterns = load_patterns(root)
-    membership_model = train_membership_classifier(root)
+    membership_model = None if cross_validated_membership else train_membership_classifier(root)
     rows = blank_template(root, split)
     fieldnames = list(rows[0])
     for scene_index, row in enumerate(rows):
+        scene_membership_model = (
+            train_membership_classifier(root, excluded_scene=row["Id"])
+            if cross_validated_membership
+            else membership_model
+        )
         predict_row(
             root,
             split,
             row,
             config,
             patterns,
-            membership_model,
+            scene_membership_model,
             top_k,
             proposals,
             cache_dir,
@@ -971,10 +1064,12 @@ def write_predictions(
             present_rate=present_rate,
             figure_rate=figure_rate,
             graph_query_factor=graph_query_factor,
+            graph_query_expansion_factor=graph_query_expansion_factor,
             min_graph_queries=min_graph_queries,
             max_graph_queries=max_graph_queries,
             consensus_trials=consensus_trials,
             transform_model=transform_model,
+            final_rank_weight=final_rank_weight,
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as stream:
@@ -1032,6 +1127,15 @@ def main() -> None:
         help="Expected figure stars as a fraction of present patches (train prior: 0.33-0.38)",
     )
     parser.add_argument("--graph-query-factor", type=float, default=2.0)
+    parser.add_argument(
+        "--graph-query-expansion-factor",
+        type=float,
+        default=1.0,
+        help=(
+            "Also search a wider membership-ranked query cloud and retain the "
+            "fit with the better density-adjusted quality; 1.0 disables it"
+        ),
+    )
     parser.add_argument("--min-graph-queries", type=int, default=12)
     parser.add_argument("--max-graph-queries", type=int, default=30)
     parser.add_argument(
@@ -1056,6 +1160,17 @@ def main() -> None:
             "statement that pattern aspect ratio is unrelated to the scene."
         ),
     )
+    parser.add_argument(
+        "--cross-validated-membership",
+        action="store_true",
+        help="For train diagnostics, fit membership on the other scenes for each prediction",
+    )
+    parser.add_argument(
+        "--final-rank-weight",
+        type=float,
+        default=0.0,
+        help="Optional best-first rank penalty in final dense graph assignment only",
+    )
     args = parser.parse_args()
     if args.top_k < 2:
         parser.error("--top-k must be at least 2")
@@ -1063,6 +1178,12 @@ def main() -> None:
         parser.error("--graph-top-k must be between 1 and --top-k")
     if args.proposals < 100:
         parser.error("--proposals must be at least 100")
+    if args.graph_query_expansion_factor < 1.0:
+        parser.error("--graph-query-expansion-factor must be at least 1.0")
+    if args.cross_validated_membership and args.split != "train":
+        parser.error("--cross-validated-membership requires --split train")
+    if args.final_rank_weight < 0.0:
+        parser.error("--final-rank-weight must be nonnegative")
     root = args.root.resolve()
     write_predictions(
         root,
@@ -1079,10 +1200,13 @@ def main() -> None:
         args.present_rate,
         args.figure_rate,
         args.graph_query_factor,
+        args.graph_query_expansion_factor,
         args.min_graph_queries,
         args.max_graph_queries,
         args.consensus_trials,
         args.transform_model,
+        args.cross_validated_membership,
+        args.final_rank_weight,
     )
 
 
