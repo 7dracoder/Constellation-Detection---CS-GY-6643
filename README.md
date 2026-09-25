@@ -20,13 +20,31 @@ disagree. The historical training diagnostic was **0.9014** strict and loose,
 with 3/3 identities. That run held out each scene from presence training but
 not from membership training; see the corrected evaluation below.
 
-For the final three daily submission slots, see the September 24 triage in
-[PROJECT_STATUS.md](PROJECT_STATUS.md). Two unscored, schema-valid alternatives
-are `outputs/submission_scene01_15_hydra.csv` (two complete course-data
-geometry rows with strong independent catalog corroboration) and
-`outputs/submission_fusion085_065_t54_rate15_gated.csv` (14 bounded
-nonmember additions). A combined file is also ready; keep a slot to decide
-on it after the first two scores. The scored 0.74973 CSV remains untouched.
+See the September 24 triage in [PROJECT_STATUS.md](PROJECT_STATUS.md). The
+two-scene Hydra alternative was submitted and received the same 0.74973 public
+score; this is inconclusive because those scenes may be private. The bounded
+two-Gaussian presence candidate remains unscored. Two daily slots remained
+after the Hydra test, and the scored baseline CSV remains untouched.
+
+Experimental raw/bandpass NCC weighting and multi-view candidate merging
+improved retained candidate recall to as much as 70/71 on labelled stars, but
+reduced held-out end-to-end score through poorer patch-specific localisation.
+These paths are default-off and **not recommended for submission**; see the
+noise audit in [PROJECT_STATUS.md](PROJECT_STATUS.md).
+
+The latest default-off geometry experiment adds invariant triangle RANSAC
+seeds and calibrates pattern significance with random placements over each
+scene's actual clustered candidate cloud. At one quarter of the old proposal
+budget, triangle/pair hybrid seeding reproduced the 0.9038 strict held-out
+baseline; adding 256 clutter trials raised it reproducibly to **0.9075**, with
+3/3 identities and 1.000 geometry. The broad validation output changed too
+many correspondences and was rejected. The conservative candidate
+[`outputs/submission_triangle_clutter256_change3_gated.csv`](outputs/submission_triangle_clutter256_change3_gated.csv)
+uses the scored 0.74973 file as fallback and applies a three-cell per-scene
+change budget derived from the labelled runs. It changes only two cells in
+scene 10, performing one node-ownership swap analogous to the Taurus change
+that produced the held-out gain. It is valid but unscored; the 0.74973 file
+remains the scored baseline until Kaggle tests this candidate.
 
 A controlled labelled sweep found `sigma=0.85` tied `sigma=0.65` at 58/71
 top-1 and 67/71 retained candidate recall, but improved the complete
@@ -45,6 +63,7 @@ of 0.01170 over the `sigma=0.65` submission.
 | Presence-refined pass | 0.71544 |
 | Gaussian σ=0.65 hybrid + multi-width identity gate | 0.73803 |
 | Gaussian σ=0.85 hybrid + same identity gate | **0.74973** |
+| Triangle + empirical clutter, three-cell safety gate | not submitted |
 | Affine-gated candidate | not submitted |
 | Teammate graphguard (v6) | 0.70102 (not promoted) |
 

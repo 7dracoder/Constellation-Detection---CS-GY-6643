@@ -24,6 +24,7 @@ from constellation_pipeline import (
     MatcherConfig,
     Prediction,
     SceneMatcher,
+    bandpass_for_matching,
     denoise_for_matching,
     extract_from_padded,
     fit_presence_threshold,
@@ -73,6 +74,10 @@ class TorchCoarseSceneMatcher(SceneMatcher):
         self.coarse_tensor = torch.from_numpy(self.coarse_image).to(
             self.device, dtype=torch.float32
         )[None, None]
+        self.coarse_bandpass_tensor = (
+            torch.from_numpy(self.coarse_bandpass).to(self.device, dtype=torch.float32)[None, None]
+            if self.coarse_bandpass is not None else None
+        )
 
     def _coarse_candidates(self, variants: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Equivalent to TM_CCOEFF_NORMED, evaluated for many filters at once."""
@@ -86,6 +91,12 @@ class TorchCoarseSceneMatcher(SceneMatcher):
             local_sum = functional.conv2d(self.coarse_tensor, ones)
             local_sum_sq = functional.conv2d(self.coarse_tensor.square(), ones)
             local_energy = (local_sum_sq - local_sum.square() / template_count).clamp_min_(1e-6)
+            if self.coarse_bandpass_tensor is not None:
+                band_sum = functional.conv2d(self.coarse_bandpass_tensor, ones)
+                band_sum_sq = functional.conv2d(self.coarse_bandpass_tensor.square(), ones)
+                band_energy = (
+                    band_sum_sq - band_sum.square() / template_count
+                ).clamp_min_(1e-6)
 
             # Preserve the transformation that produced every coarse peak.
             # The CPU matcher uses that information to test a small local
@@ -109,6 +120,24 @@ class TorchCoarseSceneMatcher(SceneMatcher):
                 response = functional.conv2d(self.coarse_tensor, filters)[0]
                 response /= local_energy.sqrt()[0]
                 response /= filter_norm[:, None, None]
+                if self.coarse_bandpass_tensor is not None:
+                    band_templates = np.stack(
+                        [
+                            cv2.resize(
+                                bandpass_for_matching(item, self.config),
+                                (small_size, small_size), interpolation=cv2.INTER_AREA,
+                            )
+                            for item in chunk
+                        ]
+                    ).astype(np.float32)
+                    band_filters = torch.from_numpy(band_templates).to(self.device)[:, None]
+                    band_filters -= band_filters.mean(dim=(2, 3), keepdim=True)
+                    band_norm = band_filters.flatten(1).norm(dim=1).clamp_min_(1e-6)
+                    band_response = functional.conv2d(self.coarse_bandpass_tensor, band_filters)[0]
+                    band_response /= band_energy.sqrt()[0]
+                    band_response /= band_norm[:, None, None]
+                    weight = self.config.bandpass_weight
+                    response = (1.0 - weight) * response + weight * band_response
 
                 # Keep separated maxima per transformation before the global
                 # coordinate-level deduplication below.  This mirrors the CPU
@@ -173,14 +202,26 @@ class TorchCoarseSceneMatcher(SceneMatcher):
             raise ValueError("limit must be positive")
 
         variants, _ = self._query_variants(query)
+        band_variants = (
+            np.stack([bandpass_for_matching(item, self.config) for item in variants])
+            if self.padded_bandpass is not None else None
+        )
         candidates, coarse_variants = self._coarse_candidates(variants)
         self.last_candidate_count = len(candidates)
         candidate_patches = extract_from_padded(self.padded_image, candidates)
         variant_vectors = normalized_vectors(variants)
         candidate_vectors = normalized_vectors(candidate_patches)
         intensity_similarity = variant_vectors @ candidate_vectors.T
-        gradient_similarity = gradient_vectors(variants) @ gradient_vectors(candidate_patches).T
-        similarity = 0.70 * intensity_similarity + 0.30 * gradient_similarity
+        if band_variants is None:
+            gradient_similarity = gradient_vectors(variants) @ gradient_vectors(candidate_patches).T
+            similarity = 0.70 * intensity_similarity + 0.30 * gradient_similarity
+            band_vectors = None
+        else:
+            band_vectors = normalized_vectors(band_variants)
+            band_patches = extract_from_padded(self.padded_bandpass, candidates)
+            band_similarity = band_vectors @ normalized_vectors(band_patches).T
+            weight = self.config.bandpass_weight
+            similarity = (1.0 - weight) * intensity_similarity + weight * band_similarity
         candidate_order = np.argsort(similarity.max(axis=0))[::-1][
             : self.config.candidate_refinement_limit
         ]
@@ -209,10 +250,22 @@ class TorchCoarseSceneMatcher(SceneMatcher):
             # maxima for all variants from a single normalised local bank.
             local_vectors = normalized_vectors(local_patches)
             local_scores = variant_vectors[np.asarray(variant_order)] @ local_vectors.T
+            if band_vectors is not None:
+                local_band_patches = extract_from_padded(self.padded_bandpass, centres)
+                local_band_vectors = normalized_vectors(local_band_patches)
+                band_scores = band_vectors[np.asarray(variant_order)] @ local_band_vectors.T
+                weight = self.config.bandpass_weight
+                local_scores = (1.0 - weight) * local_scores + weight * band_scores
             best_offsets = np.argmax(local_scores, axis=1)
             for order_index, (variant_index, offset_index) in enumerate(zip(variant_order, best_offsets)):
                 refined_x, refined_y = centres[int(offset_index)]
                 refined_patch = local_patches[int(offset_index)]
+                if band_vectors is not None:
+                    refined.append((
+                        float(local_scores[order_index, offset_index]),
+                        int(refined_x), int(refined_y),
+                    ))
+                    continue
                 gradient_score = (
                     gradient_vectors(variants[variant_index : variant_index + 1])
                     @ gradient_vectors(refined_patch[None]).T

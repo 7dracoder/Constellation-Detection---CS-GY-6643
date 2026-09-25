@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_11: canis-major support=10 assigned=13 error=5.5 cov=0.62 sig=15.6 q=15.29 nodes=16 pb=-0.03 dup=1 dup-ll=-1.11 stars=0/0 star-llr=0.00 present=32/52 queries=23 final-queries=selected votes=3/3 cloud=69 runner=hydra runner-q=6.45 margin=8.85
+partial scene output: constellation_11
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_11.csv.tmp

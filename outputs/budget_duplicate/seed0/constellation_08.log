@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_08: orion support=6 assigned=10 error=3.1 cov=0.30 sig=7.9 q=6.19 nodes=20 pb=-0.91 dup=1 dup-ll=-1.31 stars=0/0 star-llr=0.00 present=23/37 queries=24 final-queries=selected votes=3/3 cloud=72 runner=pavo runner-q=5.50 margin=0.68
+partial scene output: constellation_08
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_08.csv.tmp

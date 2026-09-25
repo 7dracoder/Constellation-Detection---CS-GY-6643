@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_02: aquila support=5 assigned=6 error=8.7 cov=0.56 sig=7.3 q=6.54 nodes=8 pb=-0.00 dup=2 dup-ll=-1.91 stars=0/0 star-llr=0.00 present=15/24 queries=18 final-queries=selected votes=3/3 cloud=54 runner=centaurus runner-q=6.10 margin=0.44
+partial scene output: constellation_02
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_02.csv.tmp

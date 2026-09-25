@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_01: ophiuchus support=5 assigned=5 error=4.0 cov=0.71 sig=8.7 q=8.17 nodes=7 pb=-0.04 dup=2 dup-ll=-2.09 stars=0/0 star-llr=0.00 present=14/23 queries=18 final-queries=selected votes=3/3 cloud=54 runner=taurus runner-q=7.27 margin=0.90
+partial scene output: constellation_01
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_01.csv.tmp

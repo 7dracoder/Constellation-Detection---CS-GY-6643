@@ -15,7 +15,15 @@ import argparse
 import csv
 from pathlib import Path
 
-from constellation_pipeline import read_csv_rows, validate_submission
+from constellation_pipeline import patch_columns, read_csv_rows, validate_submission
+
+
+def changed_patch_count(prior: dict[str, str], candidate: dict[str, str]) -> int:
+    """Count changed active patch cells without treating padding as evidence."""
+    return sum(
+        prior[column] != candidate[column]
+        for column in patch_columns(int(prior["n_patches"]))
+    )
 
 
 def main() -> None:
@@ -24,7 +32,18 @@ def main() -> None:
     parser.add_argument("--established", type=Path, required=True)
     parser.add_argument("--candidate", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--max-patch-changes",
+        type=int,
+        help=(
+            "Optional scene-level safety budget. Even when identities agree, "
+            "keep the established row if the candidate rewrites more active "
+            "patch cells than this. Omit to preserve the original behavior."
+        ),
+    )
     args = parser.parse_args()
+    if args.max_patch_changes is not None and args.max_patch_changes < 0:
+        parser.error("--max-patch-changes must be nonnegative")
 
     root = args.root.resolve()
     established = {row["Id"]: row for row in read_csv_rows(args.established.resolve())}
@@ -36,14 +55,22 @@ def main() -> None:
     accepted, rejected = [], []
     for row in candidate:
         prior = established[row["Id"]]
-        if row["constellation"] == prior["constellation"]:
+        changes = changed_patch_count(prior, row)
+        same_identity = row["constellation"] == prior["constellation"]
+        within_budget = (
+            args.max_patch_changes is None or changes <= args.max_patch_changes
+        )
+        if same_identity and within_budget:
             selected.append(row)
             accepted.append(row["Id"])
         else:
             selected.append(prior)
-            rejected.append(
-                f"{row['Id']}:{prior['constellation']}!={row['constellation']}"
+            reason = (
+                f"{prior['constellation']}!={row['constellation']}"
+                if not same_identity
+                else f"changes={changes}>{args.max_patch_changes}"
             )
+            rejected.append(f"{row['Id']}:{reason}")
 
     output = args.output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -52,7 +79,7 @@ def main() -> None:
         writer.writeheader()
         writer.writerows(selected)
     validate_submission(root, output)
-    print(f"accepted affine rows: {len(accepted)} ({', '.join(accepted)})")
+    print(f"accepted candidate rows: {len(accepted)} ({', '.join(accepted)})")
     print(f"kept established rows: {len(rejected)} ({', '.join(rejected)})")
     print(f"wrote {output}")
 

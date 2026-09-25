@@ -96,6 +96,38 @@ the first two results are known; public feedback may be uninformative for
 an individual scene, and final selection should weigh method evidence as
 well as public score.
 
+The two-scene Hydra candidate was submitted and received the **same 0.74973
+public score**. Because the public split contains only about 40% of hidden
+scenes, this does not establish whether either changed scene was scored. The
+scored baseline is still the safe fallback; do not treat this flat score as
+positive evidence for Hydra.
+
+### Weighted template matching and noise audit (September 24)
+
+An optional, default-off dual-view matcher now tests NCC on both the image and
+a Difference-of-Gaussians bandpass view. The exact suggested 0.4 raw + 0.6
+bandpass weighting retrieved the correct location among 24 candidates for
+68/71 labelled-present patches (raw: 63/71), but ranked it first for only
+53/71 (Gaussian-0.85: 58/71). After full five-seed affine geometry and the
+same held-out presence refinement, it scored **0.8811** versus the established
+**0.9038**. The constellation names were 3/3 correct but localisation fell
+from 0.687 to 0.556.
+
+A conservative Gaussian-0.85 + 0.2 bandpass variant retrieved 69/71 but
+ranked only 56/71 first. Full geometry misidentified Taurus as Orion and
+scored **0.7296**. A separate multi-hypothesis cache kept the raw top match
+while interleaving distinct bandpass alternatives for RANSAC. It retrieved
+70/71, maintained 3/3 correct identities and 1.000 loose geometry at the
+equal 12,000-proposal budget, but scored only **0.8792**; localisation was
+0.562 and patch-member F1 0.227. The 3,000-proposal screen scored 0.8866.
+
+Diagnostic overlays in `outputs/diagnostics/` were visually inspected.
+Bright structured backgrounds and mosaic seams can attract matches; long
+lines from reported points to labelled truth show that correspondence, not
+candidate retrieval alone, is the principal failure in this ablation. No
+validation CSV was built from these failed methods. The default matcher and
+scored 0.74973 artifact were not replaced.
+
 ## Gaussian-hybrid progression
 
 Previous file: `outputs/submission_hybrid_gaussian_multiwidth_gated.csv` (Kaggle
@@ -379,6 +411,93 @@ $PY error_ledger.py --root . \
   --raw-cache outputs/cache_train_adaptive \
   --filtered-cache outputs/cache_train_gaussian085 \
   --output outputs/train_strict_heldout_error_ledger.csv
+```
+
+### Triangle-seeded RANSAC and empirical clutter calibration
+
+The geometric solver now has a default-off `--proposal-mode hybrid` option.
+Half of the fixed RANSAC budget remains ordinary candidate/node pairs and half
+uses scale-free triangle side-ratio signatures. Triangle vertices are ordered
+canonically, so the seeds are invariant to translation, rotation, uniform
+scale, and reflection. On the strict scene-held-out diagnostic, 3,000 hybrid
+proposals reproduced the established **0.9038** result that previously used
+12,000 pair proposals. This is an efficiency and search-robustness gain, not
+by itself a score gain.
+
+`--clutter-trials 256` replaces the uniform candidate-density significance
+only for final fit ranking. It rotates and translates the fitted diagram over
+the actual scene candidate cloud, measures the random support distribution,
+and fits an over-dispersed beta-binomial null. This charges patterns for
+clustered false-star structure without using labels or scene identities. The
+option defaults to zero, preserving all established outputs.
+
+With hybrid 3,000-proposal search, 256 clutter trials, fully scene-held-out
+membership, and the established Gaussian-0.85 presence pass, two independent
+runs produced the same diagnostic:
+
+| Metric | Established strict baseline | Triangle + clutter |
+| --- | ---: | ---: |
+| Presence | 0.866 | 0.866 |
+| Patch localisation | 0.687 | **0.706** |
+| Set geometry | 1.000 | 1.000 |
+| Identification | 3/3 | 3/3 |
+| Patch-specific member F1 | 0.471 | **0.513** |
+| Total | 0.9038 | **0.9075** |
+
+The gain is an ownership correction, not a new star location: on Taurus one
+patch relinquishes an incorrectly owned constellation node and another patch
+takes that same node. Pisces is byte-identical; Scorpius changes a three-patch
+ownership cycle without changing its scene score. All 42 unit tests pass.
+
+The unrestricted validation candidate was deliberately not promoted. Even
+after identity agreement with the scored best it changed 49 patch cells in
+seven scenes. Of 17 member relocations, raw candidate rank improved 10 and
+worsened 7, while Gaussian rank improved only 4, worsened 8, and did not
+retain 5 locations. That is too much distribution shift for three labelled
+scenes.
+
+`submission_ensemble.py` therefore supports an optional, default-off
+`--max-patch-changes` scene budget. A budget of three is the maximum change
+observed in any labelled scene (0, 3, and 2), so it preserves the full 0.9075
+diagnostic. Applied against the current scored 0.74973 CSV, it changes only
+scene 10 and exactly two cells:
+
+- patch 42: `(1558, 2302, 1)` to its raw/Gaussian top-1 location
+  `(2308, 1654, 0)`;
+- patch 45: `(1603, 1384, 0)` to the released constellation node
+  `(1559, 2302, 1)`.
+
+This is the same ownership-swap structure as the measured Taurus gain. The
+constellation point set and every scene label remain unchanged. The schema-
+valid, unscored primary candidate is
+`outputs/submission_triangle_clutter256_change3_gated.csv`, SHA-256
+`61D2FF2DC6BFD410B2BC0D7481C10AF56D0BF5DA59338BE1363AF32A346D23AE`.
+No Kaggle score is inferred from the local result.
+
+Reproduce it from the existing caches in WSL Ubuntu:
+
+```bash
+PY=/opt/constellation-venv/bin/python
+$PY joint_geometric_solver.py --root . --config matcher_config_gpu_wide.json \
+  --output outputs/submission_triangle_clutter256_geometry.csv \
+  --split validation --device cpu --top-k 24 --graph-top-k 3 \
+  --proposals 3000 --cache-dir outputs/cache_validation_adaptive \
+  --presence-mode quantile --present-rate 0.625 \
+  --graph-query-factor 2.0 --graph-query-expansion-factor 1.5 \
+  --max-graph-queries 30 --consensus-trials 5 --transform-model affine \
+  --proposal-mode hybrid --clutter-trials 256
+$PY presence_refiner.py --root . \
+  --input outputs/submission_triangle_clutter256_geometry.csv \
+  --output outputs/submission_triangle_clutter256_gaussian085_presence.csv \
+  --split validation --cache-dir outputs/cache_validation_gaussian085 \
+  --train-cache-dir outputs/cache_train_gaussian085
+$PY submission_ensemble.py --root . \
+  --established outputs/submission_hybrid_gaussian085_multiwidth_gated.csv \
+  --candidate outputs/submission_triangle_clutter256_gaussian085_presence.csv \
+  --output outputs/submission_triangle_clutter256_change3_gated.csv \
+  --max-patch-changes 3
+$PY constellation_pipeline.py validate --root . \
+  --output outputs/submission_triangle_clutter256_change3_gated.csv
 ```
 
 ## Previous v3 submission

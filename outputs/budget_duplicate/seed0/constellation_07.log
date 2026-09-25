@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_07: perseus support=7 assigned=8 error=3.2 cov=0.64 sig=13.3 q=10.96 nodes=11 pb=-0.39 dup=4 dup-ll=-4.15 stars=0/0 star-llr=0.00 present=15/24 queries=12 final-queries=selected votes=3/3 cloud=36 runner=pavo runner-q=5.07 margin=5.89
+partial scene output: constellation_07
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_07.csv.tmp

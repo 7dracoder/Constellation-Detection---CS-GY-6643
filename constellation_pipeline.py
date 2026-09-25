@@ -62,6 +62,10 @@ class MatcherConfig:
     denoise_method: str = "none"
     denoise_sigma: float = 0.0
     denoise_kernel: int = 3
+    # Experimental dual-view NCC. Zero preserves the established matcher.
+    bandpass_weight: float = 0.0
+    bandpass_sigma_small: float = 0.8
+    bandpass_sigma_large: float = 2.2
 
 
 def read_grayscale(path: Path) -> np.ndarray:
@@ -86,6 +90,17 @@ def denoise_for_matching(image: np.ndarray, config: MatcherConfig) -> np.ndarray
             raise ValueError("Median denoising requires an odd denoise_kernel >= 3")
         return cv2.medianBlur(image, kernel).astype(np.float32)
     raise ValueError(f"Unknown denoise_method: {config.denoise_method!r}")
+
+
+def bandpass_for_matching(image: np.ndarray, config: MatcherConfig) -> np.ndarray:
+    """Difference-of-Gaussians view; preserve the original image separately."""
+    if not 0.0 <= config.bandpass_weight <= 1.0:
+        raise ValueError("bandpass_weight must be between zero and one")
+    if not 0.0 < config.bandpass_sigma_small < config.bandpass_sigma_large:
+        raise ValueError("bandpass sigmas must be positive and increasing")
+    small = cv2.GaussianBlur(image, (0, 0), config.bandpass_sigma_small)
+    large = cv2.GaussianBlur(image, (0, 0), config.bandpass_sigma_large)
+    return (small - large).astype(np.float32)
 
 
 def parse_cell(value: str) -> Optional[tuple[int, int, int]]:
@@ -268,6 +283,18 @@ class SceneMatcher:
         self.coarse_image = cv2.resize(
             self.matching_image, self.coarse_shape, interpolation=cv2.INTER_AREA
         )
+        self.bandpass_image = None
+        self.padded_bandpass = None
+        self.coarse_bandpass = None
+        if config.bandpass_weight > 0.0:
+            self.bandpass_image = bandpass_for_matching(self.matching_image, config)
+            self.padded_bandpass = cv2.copyMakeBorder(
+                self.bandpass_image, PATCH_RADIUS, PATCH_RADIUS, PATCH_RADIUS,
+                PATCH_RADIUS, cv2.BORDER_REFLECT101,
+            )
+            self.coarse_bandpass = cv2.resize(
+                self.bandpass_image, self.coarse_shape, interpolation=cv2.INTER_AREA
+            )
         self.last_candidate_count = 0
 
     def _query_variants(self, query: np.ndarray) -> tuple[np.ndarray, list[tuple[float, float]]]:
@@ -290,6 +317,16 @@ class SceneMatcher:
                 variant, (small_size, small_size), interpolation=cv2.INTER_AREA
             )
             response = cv2.matchTemplate(self.coarse_image, template, cv2.TM_CCOEFF_NORMED)
+            if self.coarse_bandpass is not None:
+                band_template = cv2.resize(
+                    bandpass_for_matching(variant, self.config),
+                    (small_size, small_size), interpolation=cv2.INTER_AREA,
+                )
+                band_response = cv2.matchTemplate(
+                    self.coarse_bandpass, band_template, cv2.TM_CCOEFF_NORMED
+                )
+                weight = self.config.bandpass_weight
+                response = (1.0 - weight) * response + weight * band_response
             peaks = response == cv2.dilate(response, peak_kernel)
             ys, xs = np.nonzero(peaks)
             values = response[ys, xs]
@@ -361,14 +398,26 @@ class SceneMatcher:
         if limit < 1:
             raise ValueError("limit must be positive")
         variants, _ = self._query_variants(query)
+        band_variants = (
+            np.stack([bandpass_for_matching(item, self.config) for item in variants])
+            if self.padded_bandpass is not None else None
+        )
         candidates, coarse_variants = self._coarse_candidates(variants)
         self.last_candidate_count = len(candidates)
         candidate_patches = extract_from_padded(self.padded_image, candidates)
         variant_vectors = normalized_vectors(variants)
         candidate_vectors = normalized_vectors(candidate_patches)
         intensity_similarity = variant_vectors @ candidate_vectors.T
-        gradient_similarity = gradient_vectors(variants) @ gradient_vectors(candidate_patches).T
-        similarity = 0.70 * intensity_similarity + 0.30 * gradient_similarity
+        if band_variants is None:
+            gradient_similarity = gradient_vectors(variants) @ gradient_vectors(candidate_patches).T
+            similarity = 0.70 * intensity_similarity + 0.30 * gradient_similarity
+            band_vectors = None
+        else:
+            band_vectors = normalized_vectors(band_variants)
+            band_patches = extract_from_padded(self.padded_bandpass, candidates)
+            band_similarity = band_vectors @ normalized_vectors(band_patches).T
+            weight = self.config.bandpass_weight
+            similarity = (1.0 - weight) * intensity_similarity + weight * band_similarity
         candidate_order = np.argsort(similarity.max(axis=0))[::-1][
             : self.config.candidate_refinement_limit
         ]
@@ -389,9 +438,28 @@ class SceneMatcher:
                 )
             )
             for variant_index in variant_order:
-                refined_x, refined_y, intensity_score = self._refine(
-                    variant_vectors[variant_index], int(candidate_x), int(candidate_y)
-                )
+                if band_vectors is None:
+                    refined_x, refined_y, intensity_score = self._refine(
+                        variant_vectors[variant_index], int(candidate_x), int(candidate_y)
+                    )
+                else:
+                    radius = self.config.refine_radius
+                    centres = np.asarray(
+                        [(candidate_x + dx, candidate_y + dy)
+                         for dy in range(-radius, radius + 1)
+                         for dx in range(-radius, radius + 1)], dtype=np.int32,
+                    )
+                    raw_patches = extract_from_padded(self.padded_image, centres)
+                    band_patches = extract_from_padded(self.padded_bandpass, centres)
+                    raw_scores = normalized_vectors(raw_patches) @ variant_vectors[variant_index]
+                    band_scores = normalized_vectors(band_patches) @ band_vectors[variant_index]
+                    weight = self.config.bandpass_weight
+                    joint_scores = (1.0 - weight) * raw_scores + weight * band_scores
+                    best_offset = int(np.argmax(joint_scores))
+                    refined_x, refined_y = (int(value) for value in centres[best_offset])
+                    intensity_score = float(joint_scores[best_offset])
+                    refined.append((intensity_score, refined_x, refined_y))
+                    continue
                 refined_patch = extract_from_padded(
                     self.padded_image,
                     np.array([[refined_x, refined_y]], dtype=np.int32),

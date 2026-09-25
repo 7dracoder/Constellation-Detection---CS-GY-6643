@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_10: centaurus support=11 assigned=14 error=6.7 cov=0.69 sig=14.0 q=13.46 nodes=16 pb=-0.22 dup=1 dup-ll=-1.11 stars=0/0 star-llr=0.00 present=38/60 queries=30 final-queries=selected votes=3/3 cloud=90 runner=none
+partial scene output: constellation_10
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_10.csv.tmp

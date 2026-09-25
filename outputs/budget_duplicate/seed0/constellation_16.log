@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_16: taurus support=6 assigned=7 error=11.4 cov=0.55 sig=8.7 q=7.52 nodes=10 pb=-0.49 dup=1 dup-ll=-0.95 stars=0/0 star-llr=0.00 present=13/21 queries=18 final-queries=selected votes=2/3 cloud=54 runner=lupus runner-q=7.30 margin=0.22
+partial scene output: constellation_16
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_16.csv.tmp

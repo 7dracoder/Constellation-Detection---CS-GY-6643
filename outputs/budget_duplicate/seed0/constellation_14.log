@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_14: corona-borealis support=6 assigned=7 error=7.2 cov=0.86 sig=12.3 q=10.92 nodes=7 pb=-1.23 dup=0 dup-ll=-0.74 stars=0/0 star-llr=0.00 present=22/36 queries=16 final-queries=selected votes=3/3 cloud=48 runner=lupus runner-q=6.50 margin=4.42
+partial scene output: constellation_14
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_14.csv.tmp

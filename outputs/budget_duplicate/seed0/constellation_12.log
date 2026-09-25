@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_12: lupus support=9 assigned=11 error=4.9 cov=0.75 sig=14.8 q=13.92 nodes=12 pb=-0.24 dup=2 dup-ll=-1.47 stars=0/0 star-llr=0.00 present=18/28 queries=20 final-queries=selected votes=3/3 cloud=60 runner=hydra runner-q=3.62 margin=10.31
+partial scene output: constellation_12
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_12.csv.tmp

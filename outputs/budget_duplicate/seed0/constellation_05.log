@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_05: cetus support=7 assigned=8 error=13.0 cov=0.37 sig=8.0 q=5.80 nodes=19 pb=-0.76 dup=1 dup-ll=-1.25 stars=0/0 star-llr=0.00 present=54/87 queries=30 final-queries=selected votes=2/3 cloud=90 runner=orion runner-q=3.73 margin=2.07
+partial scene output: constellation_05
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_05.csv.tmp

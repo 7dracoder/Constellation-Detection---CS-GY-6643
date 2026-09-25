@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import argparse
 import csv
+import itertools
 import json
 import math
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Iterable, Optional
 
@@ -29,15 +30,19 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from scipy.spatial import cKDTree
-from scipy.stats import binom
+from scipy.stats import betabinom, binom
 
 from constellation_pipeline import (
     MatcherConfig,
     Prediction,
     SceneMatcher,
+    blob_response,
     format_cell,
     image_files,
     load_config,
+    non_maximum_points,
+    normalize_image,
+    padded_extract,
     parse_cell,
     patch_columns,
     read_csv_rows,
@@ -111,6 +116,21 @@ class FitContext:
     cloud_size: int
     image_area: float
     expected_figure: float
+    image_width: float = 0.0
+    image_height: float = 0.0
+    total_patches: int = 0
+    patch_budget_weight: float = 0.0
+    patch_budget_center: float = 2.97
+    patch_budget_width: float = 0.35
+    patch_budget_clip: float = 20.0
+    star_points: Optional[np.ndarray] = None
+    star_evidence_weight: float = 0.0
+    star_tolerance: float = 20.0
+    star_evidence_clip: float = 20.0
+    duplicate_count: int = 0
+    duplicate_coverage_weight: float = 0.0
+    duplicate_coverage_rate: float = 0.10
+    duplicate_coverage_clip: float = 20.0
 
     @property
     def minimum_support(self) -> int:
@@ -140,6 +160,16 @@ class GraphFit:
     offset: Optional[np.ndarray] = None
     coverage: float = 0.0
     significance: float = 0.0
+    null_hit_probability: float = 0.0
+    null_overdispersion: float = 0.0
+    in_frame_nodes: int = 0
+    patch_budget_log_prior: float = 0.0
+    unmatched_star_hits: int = 0
+    unmatched_star_trials: int = 0
+    unmatched_star_log_likelihood: float = 0.0
+    duplicate_coverage_log_prior: float = 0.0
+    consensus_votes: int = 0
+    consensus_trials: int = 0
 
 
 def candidate_pairs(candidates: list[Candidate]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -253,6 +283,150 @@ def propose_transforms(
     if not matrices:
         return np.empty((0, 2, 2), np.float32), np.empty((0, 2), np.float32)
     return np.concatenate(matrices), np.concatenate(offsets)
+
+
+def _triangle_index(points: np.ndarray, minimum_side: float) -> tuple[np.ndarray, np.ndarray]:
+    """Return canonically ordered non-degenerate triples and scale-free signatures.
+
+    Vertices are ordered by the length of the opposite side.  That ordering is
+    invariant to translation, rotation, uniform scale and reflection, so the
+    first two ordered vertices define a consistent similarity hypothesis after
+    two triangles have been matched by their side-length ratios.
+    """
+    if len(points) < 3:
+        return np.empty((0, 3), np.int32), np.empty((0, 2), np.float32)
+    triples = np.asarray(list(itertools.combinations(range(len(points)), 3)), dtype=np.int32)
+    p0, p1, p2 = points[triples[:, 0]], points[triples[:, 1]], points[triples[:, 2]]
+    opposite = np.column_stack((
+        np.linalg.norm(p1 - p2, axis=1),
+        np.linalg.norm(p2 - p0, axis=1),
+        np.linalg.norm(p0 - p1, axis=1),
+    ))
+    longest = opposite.max(axis=1)
+    cross = np.abs(
+        (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1])
+        - (p1[:, 1] - p0[:, 1]) * (p2[:, 0] - p0[:, 0])
+    )
+    keep = (opposite.min(axis=1) >= minimum_side) & (
+        cross / np.maximum(longest * longest, 1e-6) >= 0.035
+    )
+    triples, opposite, longest = triples[keep], opposite[keep], longest[keep]
+    if not len(triples):
+        return np.empty((0, 3), np.int32), np.empty((0, 2), np.float32)
+    vertex_order = np.argsort(opposite, axis=1)
+    ordered = np.take_along_axis(triples, vertex_order, axis=1)
+    signature = np.sort(opposite, axis=1)[:, :2] / longest[:, None]
+    return ordered.astype(np.int32), signature.astype(np.float32)
+
+
+def propose_triangle_transforms(
+    source_points: np.ndarray,
+    candidates: list[Candidate],
+    proposals: int,
+    seed: int,
+    signature_tolerance: float = 0.10,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Propose similarities from compatible invariant triangle signatures."""
+    if proposals <= 0 or len(candidates) < 3 or len(source_points) < 3:
+        return np.empty((0, 2, 2), np.float32), np.empty((0, 2), np.float32)
+    points = np.asarray([(item.x, item.y) for item in candidates], dtype=np.float32)
+    queries = np.asarray([item.query_index for item in candidates], dtype=np.int32)
+    source_triples, source_signatures = _triangle_index(source_points, 8.0)
+    if not len(source_triples):
+        return np.empty((0, 2, 2), np.float32), np.empty((0, 2), np.float32)
+    signature_tree = cKDTree(source_signatures)
+    rng = np.random.default_rng(seed)
+    matrices: list[np.ndarray] = []
+    offsets: list[np.ndarray] = []
+    accepted = 0
+    attempts = 0
+    while accepted < proposals and attempts < 24:
+        attempts += 1
+        draw = max(2_048, 3 * (proposals - accepted))
+        sampled = rng.integers(len(candidates), size=(draw, 3))
+        distinct = (
+            (queries[sampled[:, 0]] != queries[sampled[:, 1]])
+            & (queries[sampled[:, 0]] != queries[sampled[:, 2]])
+            & (queries[sampled[:, 1]] != queries[sampled[:, 2]])
+        )
+        sampled = sampled[distinct]
+        if not len(sampled):
+            continue
+        candidate_points = points[sampled.reshape(-1)].reshape(-1, 3, 2)
+        # Reuse the same invariant construction without materialising every
+        # possible candidate triple, which would be cubic in the cloud size.
+        p0, p1, p2 = candidate_points[:, 0], candidate_points[:, 1], candidate_points[:, 2]
+        opposite = np.column_stack((
+            np.linalg.norm(p1 - p2, axis=1),
+            np.linalg.norm(p2 - p0, axis=1),
+            np.linalg.norm(p0 - p1, axis=1),
+        ))
+        longest = opposite.max(axis=1)
+        cross = np.abs(
+            (p1[:, 0] - p0[:, 0]) * (p2[:, 1] - p0[:, 1])
+            - (p1[:, 1] - p0[:, 1]) * (p2[:, 0] - p0[:, 0])
+        )
+        valid = (opposite.min(axis=1) >= 24.0) & (
+            cross / np.maximum(longest * longest, 1e-6) >= 0.035
+        )
+        sampled, opposite, longest = sampled[valid], opposite[valid], longest[valid]
+        if not len(sampled):
+            continue
+        candidate_order = np.argsort(opposite, axis=1)
+        candidate_triples = np.take_along_axis(sampled, candidate_order, axis=1)
+        signatures = np.sort(opposite, axis=1)[:, :2] / longest[:, None]
+        signature_distance, source_index = signature_tree.query(signatures, k=1)
+        compatible = signature_distance <= signature_tolerance
+        candidate_triples = candidate_triples[compatible]
+        source_match = source_triples[np.asarray(source_index[compatible], dtype=np.int32)]
+        if not len(candidate_triples):
+            continue
+        take = min(proposals - accepted, len(candidate_triples))
+        candidate_triples, source_match = candidate_triples[:take], source_match[:take]
+        matrix, offset = similarity_from_pairs(
+            source_points,
+            points,
+            source_match[:, 0],
+            source_match[:, 1],
+            candidate_triples[:, 0],
+            candidate_triples[:, 1],
+        )
+        scale = np.sqrt(np.abs(np.linalg.det(matrix)))
+        scale_ok = (scale >= RANSAC_SCALE_RATIO_MIN) & (scale <= RANSAC_SCALE_RATIO_MAX)
+        if np.any(scale_ok):
+            matrices.append(matrix[scale_ok])
+            offsets.append(offset[scale_ok])
+            accepted += int(np.sum(scale_ok))
+    if not matrices:
+        return np.empty((0, 2, 2), np.float32), np.empty((0, 2), np.float32)
+    return np.concatenate(matrices)[:proposals], np.concatenate(offsets)[:proposals]
+
+
+def propose_hybrid_transforms(
+    source_points: np.ndarray,
+    candidates: list[Candidate],
+    proposals: int,
+    seed: int,
+    proposal_mode: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Dispatch pair, triangle, or evenly budgeted hybrid hypotheses."""
+    if proposal_mode == "pair":
+        return propose_transforms(source_points, candidates, proposals, seed)
+    if proposal_mode == "triangle":
+        return propose_triangle_transforms(source_points, candidates, proposals, seed)
+    if proposal_mode != "hybrid":
+        raise ValueError(f"Unknown proposal mode: {proposal_mode}")
+    triangle_budget = proposals // 2
+    pair_matrix, pair_offset = propose_transforms(
+        source_points, candidates, proposals - triangle_budget, seed
+    )
+    triangle_matrix, triangle_offset = propose_triangle_transforms(
+        source_points, candidates, triangle_budget, seed + 65_537
+    )
+    return (
+        np.concatenate((pair_matrix, triangle_matrix)),
+        np.concatenate((pair_offset, triangle_offset)),
+    )
 
 
 def top_hypotheses(
@@ -537,6 +711,137 @@ def assign_queries(
     return best
 
 
+def patch_budget_log_prior(
+    total_patches: int,
+    in_frame_nodes: int,
+    center: float = 2.97,
+    width: float = 0.35,
+    clip: float = 20.0,
+) -> float:
+    """Bounded plausibility of query count relative to visible figure size.
+
+    The ratio is evaluated in log space so equally large multiplicative errors
+    receive equal penalties.  All inputs are available for an unseen scene;
+    no scene identifier or pattern name participates.
+    """
+    if total_patches <= 0 or in_frame_nodes <= 0:
+        return 0.0
+    if center <= 0.0 or width <= 0.0 or clip < 0.0:
+        raise ValueError("Patch-budget center/width must be positive and clip nonnegative")
+    z = (math.log(total_patches / in_frame_nodes) - math.log(center)) / width
+    return float(max(-0.5 * z * z, -clip))
+
+
+def duplicate_coverage_log_prior(
+    duplicate_count: int,
+    in_frame_nodes: int,
+    rate: float = 0.10,
+    clip: float = 20.0,
+) -> float:
+    """Bounded likelihood of the observed copy count for a visible figure size."""
+    if duplicate_count < 0 or in_frame_nodes < 0:
+        raise ValueError("Duplicate and node counts must be nonnegative")
+    if not 0.0 < rate < 1.0 or clip < 0.0:
+        raise ValueError("Duplicate rate must be in (0, 1) and clip nonnegative")
+    value = float(binom.logpmf(duplicate_count, in_frame_nodes, rate))
+    return float(max(value, -clip)) if math.isfinite(value) else float(-clip)
+
+
+def duplicate_candidate_scores(
+    image: np.ndarray,
+    candidates_by_query: list[list[Candidate]],
+    top_k: int = 10,
+    radius: int = 50,
+    inner_radius: float = 20.0,
+) -> np.ndarray:
+    """Measure copy-paste evidence between each query's top candidate regions.
+
+    This evidence may promote a query or add a bounded prior, but it never
+    removes a candidate from the geometric search.
+    """
+    if top_k < 2 or radius < 3 or not 0.0 <= inner_radius < radius - 1:
+        raise ValueError("Invalid duplicate-evidence geometry")
+    size = 2 * radius
+    yy, xx = np.mgrid[:size, :size]
+    centre = (size - 1) / 2.0
+    distance = np.hypot(xx - centre, yy - centre)
+    mask = (distance >= inner_radius) & (distance <= radius - 2)
+    scores = np.full(len(candidates_by_query), -1.0, dtype=np.float32)
+    for query_index, group in enumerate(candidates_by_query):
+        retained = group[:top_k]
+        if len(retained) < 2:
+            continue
+        points = np.asarray([(item.x, item.y) for item in retained], dtype=np.float32)
+        patches = padded_extract(image, np.rint(points).astype(np.int32), radius=radius)
+        vectors = patches[:, mask].astype(np.float32)
+        vectors -= vectors.mean(axis=1, keepdims=True)
+        vectors /= np.linalg.norm(vectors, axis=1, keepdims=True) + 1e-6
+        scores[query_index] = float(np.max(vectors[1:] @ vectors[0]))
+    return scores
+
+
+def unmatched_node_star_evidence(
+    mapped: np.ndarray,
+    assignments: dict[int, Candidate],
+    context: FitContext,
+) -> tuple[int, int, float]:
+    """Likelihood evidence from in-frame nodes not explained by query patches.
+
+    Assigned nodes already contributed patch-match evidence, so counting their
+    nearby stars again would double-count the same observation.  For every
+    remaining visible node we compare a nearby detected-star hit against the
+    chance rate implied by the scene's star density.  Both rewards and missing-
+    star penalties are bounded, preventing this auxiliary term from dominating
+    a confident geometric fit.
+    """
+    stars = context.star_points
+    if (
+        stars is None
+        or not len(stars)
+        or context.image_width <= 0.0
+        or context.image_height <= 0.0
+        or context.star_tolerance <= 0.0
+    ):
+        return 0, 0, 0.0
+    mapped = np.asarray(mapped, dtype=np.float32)
+    in_frame = (
+        (mapped[:, 0] >= 0.0)
+        & (mapped[:, 0] < context.image_width)
+        & (mapped[:, 1] >= 0.0)
+        & (mapped[:, 1] < context.image_height)
+    )
+    assigned_nodes: set[int] = set()
+    if assignments:
+        points = np.asarray(
+            [(item.x, item.y) for item in assignments.values()], dtype=np.float32
+        )
+        nearest = np.linalg.norm(points[:, None, :] - mapped[None, :, :], axis=2).argmin(axis=1)
+        assigned_nodes.update(int(index) for index in nearest)
+    tested = np.asarray(
+        [index for index in np.flatnonzero(in_frame) if int(index) not in assigned_nodes],
+        dtype=np.int32,
+    )
+    if not len(tested):
+        return 0, 0, 0.0
+    distances = cKDTree(np.asarray(stars, dtype=np.float32)).query(mapped[tested], k=1)[0]
+    hits = int(np.sum(distances <= context.star_tolerance))
+    trials = int(len(tested))
+    chance = float(np.clip(
+        len(stars) * math.pi * context.star_tolerance**2 / context.image_area,
+        1e-4,
+        0.75,
+    ))
+    expected = 0.90
+    log_likelihood = (
+        hits * math.log(expected / chance)
+        + (trials - hits) * math.log((1.0 - expected) / (1.0 - chance))
+    )
+    bounded = float(np.clip(
+        log_likelihood, -context.star_evidence_clip, context.star_evidence_clip
+    ))
+    return hits, trials, bounded
+
+
 def graph_fit_from_assignment(
     pattern: Pattern,
     mapped: np.ndarray,
@@ -575,6 +880,33 @@ def graph_fit_from_assignment(
     support = len(assignments)
     nodes = len(pattern.points)
 
+    if context.image_width > 0.0 and context.image_height > 0.0:
+        in_frame = (
+            (mapped[:, 0] >= 0.0)
+            & (mapped[:, 0] < context.image_width)
+            & (mapped[:, 1] >= 0.0)
+            & (mapped[:, 1] < context.image_height)
+        )
+        in_frame_nodes = int(np.sum(in_frame))
+    else:
+        in_frame_nodes = nodes
+    budget_prior = patch_budget_log_prior(
+        context.total_patches,
+        in_frame_nodes,
+        context.patch_budget_center,
+        context.patch_budget_width,
+        context.patch_budget_clip,
+    )
+    duplicate_prior = duplicate_coverage_log_prior(
+        context.duplicate_count,
+        in_frame_nodes,
+        context.duplicate_coverage_rate,
+        context.duplicate_coverage_clip,
+    )
+    star_hits, star_trials, star_likelihood = unmatched_node_star_evidence(
+        mapped, assignments, context
+    )
+
     coverage = support / nodes
     hit_probability = float(
         np.clip(context.cloud_size * math.pi * tolerance * tolerance / context.image_area, 1e-9, 1.0 - 1e-9)
@@ -590,19 +922,143 @@ def graph_fit_from_assignment(
         + SCORE_COVERAGE_WEIGHT * coverage
         - mean_error / tolerance
         - SCORE_COUNT_WEIGHT * count_penalty
+        + context.patch_budget_weight * budget_prior
+        + context.star_evidence_weight * star_likelihood
+        + context.duplicate_coverage_weight * duplicate_prior
     )
     return GraphFit(
-        pattern,
-        mapped,
-        assignments,
-        support,
-        mean_error,
-        tolerance,
-        quality,
-        matrix,
-        offset,
-        coverage,
-        significance,
+        pattern=pattern,
+        mapped_points=mapped,
+        assignments=assignments,
+        support=support,
+        mean_error=mean_error,
+        tolerance=tolerance,
+        quality=quality,
+        matrix=matrix,
+        offset=offset,
+        coverage=coverage,
+        significance=significance,
+        in_frame_nodes=in_frame_nodes,
+        patch_budget_log_prior=budget_prior,
+        unmatched_star_hits=star_hits,
+        unmatched_star_trials=star_trials,
+        unmatched_star_log_likelihood=star_likelihood,
+        duplicate_coverage_log_prior=duplicate_prior,
+    )
+
+
+def _support_tail_significance(
+    support: int,
+    nodes: int,
+    null_supports: np.ndarray,
+) -> tuple[float, float, float]:
+    """Fit an over-dispersed binomial null to random-placement supports.
+
+    A plain binomial assumes every pattern node independently sees a uniform
+    point cloud. Real star candidates occur in clusters and along textured
+    structures, so those node hits are correlated. The beta-binomial keeps
+    the measured mean hit rate while using the variance across random rigid
+    placements to estimate that correlation.
+    """
+    samples = np.asarray(null_supports, dtype=np.float64)
+    if nodes <= 0 or not len(samples):
+        return 0.0, 0.0, 0.0
+    hit_probability = float(np.clip(samples.mean() / nodes, 1e-9, 1.0 - 1e-9))
+    binomial_variance = nodes * hit_probability * (1.0 - hit_probability)
+    if nodes <= 1 or binomial_variance <= 1e-12:
+        overdispersion = 0.0
+    else:
+        overdispersion = float(np.clip(
+            (samples.var(ddof=1) / binomial_variance - 1.0) / (nodes - 1),
+            0.0,
+            0.95,
+        ))
+    if overdispersion <= 1e-6:
+        log_tail = float(binom.logsf(support - 1, nodes, hit_probability))
+    else:
+        concentration = (1.0 - overdispersion) / overdispersion
+        alpha = hit_probability * concentration
+        beta = (1.0 - hit_probability) * concentration
+        # scipy's direct beta-binomial logsf can return NaN for otherwise
+        # valid extreme alpha/beta values because it computes log(1-cdf).
+        # Summing the short discrete upper tail in log space is stable.
+        upper = np.arange(max(0, support), nodes + 1, dtype=np.int32)
+        log_probability = betabinom.logpmf(upper, nodes, alpha, beta)
+        log_tail = float(np.logaddexp.reduce(log_probability))
+    significance = -log_tail / math.log(10.0)
+    if not math.isfinite(significance):
+        significance = 0.0
+    return float(significance), hit_probability, overdispersion
+
+
+def recalibrate_fit_for_clutter(
+    fit: GraphFit,
+    candidates: list[Candidate],
+    context: FitContext,
+    trials: int,
+    seed: int,
+) -> GraphFit:
+    """Re-score a fit against this scene's measured spatial clutter.
+
+    The fitted diagram is randomly rotated and translated over the same image.
+    At each placement we count how many nodes land within the fitted tolerance
+    of the actual candidate cloud. This preserves clustered false stars, seams,
+    and other scene-specific structures that a uniform-density null misses.
+    No labels participate in the calibration.
+    """
+    if (
+        trials <= 0
+        or context.image_width <= 0.0
+        or context.image_height <= 0.0
+        or not candidates
+        or not len(fit.mapped_points)
+    ):
+        return fit
+    candidate_points = np.asarray([(item.x, item.y) for item in candidates], dtype=np.float32)
+    tree = cKDTree(candidate_points)
+    mapped = np.asarray(fit.mapped_points, dtype=np.float32)
+    centered = mapped - mapped.mean(axis=0)
+    rng = np.random.default_rng(seed)
+    angles = rng.uniform(0.0, 2.0 * math.pi, size=trials)
+    cosine, sine = np.cos(angles), np.sin(angles)
+    rotations = np.stack((cosine, -sine, sine, cosine), axis=1).reshape(
+        -1, 2, 2
+    ).astype(np.float32)
+    rotated = np.einsum("tij,nj->tni", rotations, centered)
+    centres = np.column_stack((
+        rng.uniform(0.0, context.image_width, size=trials),
+        rng.uniform(0.0, context.image_height, size=trials),
+    )).astype(np.float32)
+    placed = rotated + centres[:, None, :]
+    inside = (
+        (placed[:, :, 0] >= 0.0)
+        & (placed[:, :, 0] < context.image_width)
+        & (placed[:, :, 1] >= 0.0)
+        & (placed[:, :, 1] < context.image_height)
+    )
+    distances = tree.query(placed.reshape(-1, 2), k=1)[0].reshape(trials, -1)
+    null_supports = np.sum(inside & (distances <= fit.tolerance), axis=1)
+    significance, hit_probability, overdispersion = _support_tail_significance(
+        fit.support, len(fit.pattern.points), null_supports
+    )
+    count_penalty = abs(fit.support - context.expected_figure) / max(
+        context.expected_figure, 1.0
+    )
+    quality = float(
+        significance
+        + SCORE_COVERAGE_WEIGHT * fit.coverage
+        - fit.mean_error / fit.tolerance
+        - SCORE_COUNT_WEIGHT * count_penalty
+        + context.patch_budget_weight * fit.patch_budget_log_prior
+        + context.star_evidence_weight * fit.unmatched_star_log_likelihood
+        + context.duplicate_coverage_weight * fit.duplicate_coverage_log_prior
+    )
+    return replace(
+        fit,
+        quality=quality,
+        significance=significance,
+        null_hit_probability=hit_probability,
+        null_overdispersion=overdispersion,
     )
 
 
@@ -613,11 +1069,14 @@ def fit_pattern(
     seed: int,
     context: FitContext,
     transform_model: str,
+    proposal_mode: str = "pair",
 ) -> Optional[GraphFit]:
     """Fit both possible handednesses of a supplied reference pattern."""
     best: Optional[GraphFit] = None
     for reflected, source in enumerate((pattern.points, pattern.points * np.array((1.0, -1.0), np.float32))):
-        matrices, offsets = propose_transforms(source, candidates, proposals, seed + 10_007 * reflected)
+        matrices, offsets = propose_hybrid_transforms(
+            source, candidates, proposals, seed + 10_007 * reflected, proposal_mode
+        )
         for matrix, offset, _ in top_hypotheses(source, candidates, matrices, offsets):
             fit = assign_queries(
                 pattern, source, matrix, offset, candidates, context, transform_model=transform_model
@@ -628,10 +1087,12 @@ def fit_pattern(
 
 
 def _fit_pattern_task(
-    args: tuple[Pattern, list[Candidate], int, int, FitContext, str]
+    args: tuple[Pattern, list[Candidate], int, int, FitContext, str, str]
 ) -> Optional[GraphFit]:
-    pattern, candidates, proposals, seed, context, transform_model = args
-    return fit_pattern(pattern, candidates, proposals, seed, context, transform_model)
+    pattern, candidates, proposals, seed, context, transform_model, proposal_mode = args
+    return fit_pattern(
+        pattern, candidates, proposals, seed, context, transform_model, proposal_mode
+    )
 
 
 def choose_fit(
@@ -641,21 +1102,35 @@ def choose_fit(
     seed: int,
     context: FitContext,
     transform_model: str = "similarity",
+    proposal_mode: str = "pair",
+    clutter_trials: int = 0,
+    pattern_workers: int = 2,
 ) -> tuple[Optional[GraphFit], Optional[GraphFit]]:
     # This runs after the CUDA scene matcher has initialized.  Threads avoid
     # forking a process with a live CUDA context, which can deadlock in Colab.
     # NumPy/SciPy do the expensive numeric work outside Python's GIL.
     tasks = [
-        (pattern, candidates, proposals, seed + 101 * index, context, transform_model)
+        (pattern, candidates, proposals, seed + 101 * index, context, transform_model, proposal_mode)
         for index, pattern in enumerate(patterns)
     ]
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    with ThreadPoolExecutor(max_workers=pattern_workers) as executor:
         # Two points always define a similarity transform, so a three-node
         # agreement is not identification evidence.  Such a fit previously
         # could still win on quality and, because the caller requires
         # support >= 4 to emit a name, silently force the scene to "unknown"
         # while a genuine larger fit existed.
         found = [fit for fit in executor.map(_fit_pattern_task, tasks) if fit is not None]
+    if clutter_trials > 0:
+        found = [
+            recalibrate_fit_for_clutter(
+                fit,
+                candidates,
+                context,
+                clutter_trials,
+                seed + 1_000_003 + 7_919 * index,
+            )
+            for index, fit in enumerate(found)
+        ]
     # Prefer fits that clear the expected-figure floor.  If none does, still
     # return the best three-degrees-of-freedom-beating fit rather than nothing:
     # the identity term is scored as accuracy, so declining to name a scene
@@ -674,6 +1149,11 @@ def choose_fit_consensus(
     context: FitContext,
     trials: int,
     transform_model: str = "similarity",
+    proposal_mode: str = "pair",
+    clutter_trials: int = 0,
+    pattern_workers: int = 2,
+    selection_mode: str = "plurality",
+    vote_weight: float = 0.75,
 ) -> tuple[Optional[GraphFit], Optional[GraphFit]]:
     """Run ``choose_fit`` at several seeds and report the plurality winner.
 
@@ -697,6 +1177,9 @@ def choose_fit_consensus(
             seed + 7_919 * trial,
             context,
             transform_model,
+            proposal_mode,
+            clutter_trials,
+            pattern_workers,
         )
         for trial in range(max(1, trials))
     ]
@@ -706,14 +1189,43 @@ def choose_fit_consensus(
     tally: dict[str, int] = {}
     for fit in winners:
         tally[fit.pattern.name] = tally.get(fit.pattern.name, 0) + 1
-    top_name = max(tally, key=lambda name: (tally[name], name))
-    agreeing = [fit for fit in winners if fit.pattern.name == top_name]
-    consensus = max(agreeing, key=lambda fit: fit.quality)
+    pool = [fit for outcome in outcomes for fit in outcome if fit is not None]
+    best_by_name: dict[str, GraphFit] = {}
+    for fit in pool:
+        prior = best_by_name.get(fit.pattern.name)
+        if prior is None or fit.quality > prior.quality:
+            best_by_name[fit.pattern.name] = fit
+    if selection_mode == "plurality":
+        top_name = max(tally, key=lambda name: (tally[name], name))
+    elif selection_mode == "quality":
+        top_name = max(best_by_name, key=lambda name: best_by_name[name].quality)
+    elif selection_mode == "vote-quality":
+        top_name = max(
+            best_by_name,
+            key=lambda name: (
+                best_by_name[name].quality + vote_weight * tally.get(name, 0),
+                tally.get(name, 0),
+                name,
+            ),
+        )
+    else:
+        raise ValueError(f"Unknown consensus selection mode: {selection_mode}")
+    consensus = replace(
+        best_by_name[top_name],
+        consensus_votes=tally.get(top_name, 0),
+        consensus_trials=len(outcomes),
+    )
     other = max(
-        (fit for fit in winners if fit.pattern.name != top_name),
+        (fit for name, fit in best_by_name.items() if name != top_name),
         key=lambda fit: fit.quality,
         default=None,
     )
+    if other is not None:
+        other = replace(
+            other,
+            consensus_votes=tally.get(other.pattern.name, 0),
+            consensus_trials=len(outcomes),
+        )
     return consensus, other
 
 
@@ -722,6 +1234,40 @@ def cache_path(cache_dir: Optional[Path], scene: str) -> Optional[Path]:
         return None
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir / f"{scene}.json"
+
+
+def merge_dense_candidate_views(
+    primary: list[list[Candidate]],
+    alternates: list[list[list[Candidate]]],
+    minimum_separation: float = 6.0,
+) -> list[list[Candidate]]:
+    """Union candidate views for final assignment without changing fit order.
+
+    NCC values from raw, Gaussian and band-pass images are not on a shared
+    numeric scale.  Preserve each alternate candidate's *rank* by mapping its
+    score onto the primary view's score at the same rank.  Otherwise the
+    global score normalisation in :func:`assignment_costs` can prefer an
+    entire filtered view merely because its NCC distribution is shifted.
+    """
+    merged = [list(group) for group in primary]
+    separation2 = minimum_separation * minimum_separation
+    for view in alternates:
+        if len(view) != len(merged):
+            raise ValueError("Dense candidate views contain different query counts")
+        for query_index, additions in enumerate(view):
+            baseline = primary[query_index]
+            if not baseline:
+                raise ValueError("Primary dense candidate group cannot be empty")
+            for rank, candidate in enumerate(additions):
+                if all(
+                    (candidate.x - old.x) ** 2 + (candidate.y - old.y) ** 2 > separation2
+                    for old in merged[query_index]
+                ):
+                    reference = baseline[min(rank, len(baseline) - 1)]
+                    merged[query_index].append(
+                        replace(candidate, score=reference.score - 0.001, margin=0.0)
+                    )
+    return merged
 
 
 def scene_candidates(
@@ -824,6 +1370,22 @@ def graph_query_targets(
     return tuple(dict.fromkeys((min(base, available), min(expanded, available))))
 
 
+def final_assignment_queries(
+    scope: str, selected_queries: list[int], query_count: int
+) -> list[int]:
+    """Choose who may fill nodes after the transform and identity are fixed.
+
+    RANSAC still uses the precision-oriented membership shortlist.  ``all``
+    only broadens the final one-to-one assignment so a dim query omitted by
+    that shortlist can be rescued by landing on a mapped constellation node.
+    """
+    if scope == "selected":
+        return selected_queries
+    if scope == "all":
+        return list(range(query_count))
+    raise ValueError(f"Unknown final assignment query scope: {scope}")
+
+
 def predict_row(
     root: Path,
     split: str,
@@ -834,6 +1396,7 @@ def predict_row(
     top_k: int,
     proposals: int,
     cache_dir: Optional[Path],
+    dense_cache_dirs: tuple[Path, ...],
     seed: int,
     device: str,
     batch_size: int,
@@ -847,7 +1410,26 @@ def predict_row(
     max_graph_queries: int,
     consensus_trials: int,
     transform_model: str,
+    proposal_mode: str = "pair",
+    clutter_trials: int = 0,
     final_rank_weight: float = 0.0,
+    final_query_scope: str = "selected",
+    pattern_workers: int = 2,
+    consensus_selection: str = "plurality",
+    consensus_vote_weight: float = 0.75,
+    patch_budget_weight: float = 0.0,
+    patch_budget_center: float = 2.97,
+    patch_budget_width: float = 0.35,
+    star_evidence_weight: float = 0.0,
+    star_evidence_points: int = 300,
+    star_evidence_tolerance: float = 20.0,
+    duplicate_evidence_cache_dir: Optional[Path] = None,
+    duplicate_evidence_threshold: float = 0.95,
+    duplicate_evidence_top_k: int = 10,
+    duplicate_coverage_weight: float = 0.0,
+    duplicate_coverage_rate: float = 0.10,
+    duplicate_anchor_priority: bool = False,
+    duplicate_force_present: bool = False,
 ) -> dict[str, str]:
     scene = row["Id"]
     active = patch_columns(int(row["n_patches"]))
@@ -864,7 +1446,40 @@ def predict_row(
         matcher = SceneMatcher(image_paths[0], config)
     height, width = matcher.image.shape
     image_area = float(height * width)
+    star_points: Optional[np.ndarray] = None
+    if star_evidence_weight > 0.0:
+        normalized = normalize_image(matcher.image, config.background_sigma)
+        response = blob_response(normalized, config)
+        detected, _ = non_maximum_points(response, config, border=4)
+        star_points = detected[:star_evidence_points].astype(np.float32)
     candidates_by_query = scene_candidates(root, split, scene, active, matcher, top_k, cache_dir)
+    use_duplicate_evidence = (
+        duplicate_coverage_weight > 0.0
+        or duplicate_anchor_priority
+        or duplicate_force_present
+    )
+    duplicate_source = candidates_by_query
+    if use_duplicate_evidence and duplicate_evidence_cache_dir is not None:
+        duplicate_source = scene_candidates(
+            root, split, scene, active, matcher, top_k, duplicate_evidence_cache_dir
+        )
+    duplicate_scores = (
+        duplicate_candidate_scores(
+            matcher.image, duplicate_source, top_k=duplicate_evidence_top_k
+        )
+        if use_duplicate_evidence
+        else np.full(len(active), -1.0, dtype=np.float32)
+    )
+    duplicate_flags = duplicate_scores >= duplicate_evidence_threshold
+    duplicate_count = int(np.sum(duplicate_flags))
+    alternate_dense_views = [
+        scene_candidates(root, split, scene, active, matcher, top_k, directory)
+        for directory in dense_cache_dirs
+        if cache_dir is None or directory.resolve() != cache_dir.resolve()
+    ]
+    dense_candidates_by_query = merge_dense_candidate_views(
+        candidates_by_query, alternate_dense_views
+    )
     probabilities = membership_probabilities(root, split, scene, active, membership_model)
 
     direct_scores = np.asarray([group[0].score for group in candidates_by_query], dtype=np.float32)
@@ -880,7 +1495,12 @@ def predict_row(
     # every pattern looks like a coincidence.  Taking a scene-adaptive number
     # of the most figure-like queries keeps the cloud in the range the
     # labelled scenes exercised, whatever the probabilities happen to be.
-    order = np.argsort(probabilities)[::-1]
+    proposal_priority = probabilities.copy()
+    if duplicate_anchor_priority and duplicate_count:
+        proposal_priority[duplicate_flags] = (
+            float(np.max(proposal_priority)) + 1.0 + duplicate_scores[duplicate_flags]
+        )
+    order = np.argsort(proposal_priority)[::-1]
     targets = graph_query_targets(
         expected_figure,
         graph_query_factor,
@@ -910,7 +1530,23 @@ def predict_row(
             for query in selected
             for item in candidates_by_query[query][: max(1, graph_top_k)]
         ]
-        fit_context = FitContext(len(fit_cloud), image_area, expected_figure)
+        fit_context = FitContext(
+            cloud_size=len(fit_cloud),
+            image_area=image_area,
+            expected_figure=expected_figure,
+            image_width=float(width),
+            image_height=float(height),
+            total_patches=len(active),
+            patch_budget_weight=patch_budget_weight,
+            patch_budget_center=patch_budget_center,
+            patch_budget_width=patch_budget_width,
+            star_points=star_points,
+            star_evidence_weight=star_evidence_weight,
+            star_tolerance=star_evidence_tolerance,
+            duplicate_count=duplicate_count,
+            duplicate_coverage_weight=duplicate_coverage_weight,
+            duplicate_coverage_rate=duplicate_coverage_rate,
+        )
         width_best, width_runner = choose_fit_consensus(
             patterns,
             fit_cloud,
@@ -919,6 +1555,11 @@ def predict_row(
             fit_context,
             consensus_trials,
             transform_model,
+            proposal_mode,
+            clutter_trials,
+            pattern_workers,
+            consensus_selection,
+            consensus_vote_weight,
         )
         if width_best is not None:
             width_results.append(
@@ -946,14 +1587,37 @@ def predict_row(
             for query in selected_queries
             for item in candidates_by_query[query][: max(1, graph_top_k)]
         ]
-        context = FitContext(len(fit_candidates), image_area, expected_figure)
+        context = FitContext(
+            cloud_size=len(fit_candidates),
+            image_area=image_area,
+            expected_figure=expected_figure,
+            image_width=float(width),
+            image_height=float(height),
+            total_patches=len(active),
+            patch_budget_weight=patch_budget_weight,
+            patch_budget_center=patch_budget_center,
+            patch_budget_width=patch_budget_width,
+            star_points=star_points,
+            star_evidence_weight=star_evidence_weight,
+            star_tolerance=star_evidence_tolerance,
+            duplicate_count=duplicate_count,
+            duplicate_coverage_weight=duplicate_coverage_weight,
+            duplicate_coverage_rate=duplicate_coverage_rate,
+        )
 
     graph_assignments: dict[int, Candidate] = {}
     if best is not None and best.support >= 4:
         # Precision chose the pattern; recall now places the stars.  Re-run the
         # one-to-one assignment against every retained candidate so a figure
         # star whose best location sat outside the sparse cloud is recovered.
-        dense = [item for query in selected_queries for item in candidates_by_query[query]]
+        assignment_queries = final_assignment_queries(
+            final_query_scope, selected_queries, len(active)
+        )
+        dense = [
+            item
+            for query in assignment_queries
+            for item in dense_candidates_by_query[query]
+        ]
         graph_assignments = assign_to_mapped(
             best.mapped_points, dense, best.tolerance, rank_weight=final_rank_weight
         )
@@ -970,24 +1634,40 @@ def predict_row(
             row[column] = format_cell(
                 Prediction(int(round(point.x)), int(round(point.y)), m=1, score=point.score)
             )
-        elif direct.score >= cutoff:
+        elif (duplicate_force_present and duplicate_flags[query_index]) or direct.score >= cutoff:
             row[column] = format_cell(
                 Prediction(int(round(direct.x)), int(round(direct.y)), m=0, score=direct.score)
             )
         else:
             row[column] = "-1"
     error_text = f"{best.mean_error:.1f}" if best is not None else "n/a"
+    clutter_detail = (
+        f" null-p={best.null_hit_probability:.3f} rho={best.null_overdispersion:.3f}"
+        if best is not None and clutter_trials > 0
+        else ""
+    )
     detail = (
-        f"cov={best.coverage:.2f} sig={best.significance:.1f} q={best.quality:.2f}"
+        f"cov={best.coverage:.2f} sig={best.significance:.1f} q={best.quality:.2f} "
+        f"nodes={best.in_frame_nodes} pb={best.patch_budget_log_prior:.2f} "
+        f"dup={duplicate_count} dup-ll={best.duplicate_coverage_log_prior:.2f} "
+        f"stars={best.unmatched_star_hits}/{best.unmatched_star_trials} "
+        f"star-llr={best.unmatched_star_log_likelihood:.2f}{clutter_detail}"
         if best is not None
         else ""
+    )
+    runner_detail = (
+        f"runner={runner.pattern.name} runner-q={runner.quality:.2f} "
+        f"margin={best.quality - runner.quality:.2f}"
+        if best is not None and runner is not None
+        else "runner=none"
     )
     print(
         f"{scene}: {row['constellation']} support={best.support if best else 0} "
         f"assigned={len(graph_assignments)} error={error_text} {detail} "
         f"present={present_count}/{len(active)} queries={len(selected_queries)} "
-        f"cloud={len(fit_candidates)} "
-        f"runner={runner.pattern.name if runner else 'none'}",
+        f"final-queries={final_query_scope} "
+        f"votes={best.consensus_votes}/{best.consensus_trials} "
+        f"cloud={len(fit_candidates)} {runner_detail}",
         flush=True,
     )
     return row
@@ -1019,6 +1699,7 @@ def write_predictions(
     top_k: int,
     proposals: int,
     cache_dir: Optional[Path],
+    dense_cache_dirs: tuple[Path, ...],
     device: str,
     batch_size: int,
     graph_top_k: int,
@@ -1033,14 +1714,44 @@ def write_predictions(
     transform_model: str,
     cross_validated_membership: bool = False,
     final_rank_weight: float = 0.0,
+    final_query_scope: str = "selected",
+    pattern_workers: int = 2,
+    consensus_selection: str = "plurality",
+    consensus_vote_weight: float = 0.75,
+    proposal_mode: str = "pair",
+    clutter_trials: int = 0,
+    patch_budget_weight: float = 0.0,
+    patch_budget_center: float = 2.97,
+    patch_budget_width: float = 0.35,
+    star_evidence_weight: float = 0.0,
+    star_evidence_points: int = 300,
+    star_evidence_tolerance: float = 20.0,
+    duplicate_evidence_cache_dir: Optional[Path] = None,
+    duplicate_evidence_threshold: float = 0.95,
+    duplicate_evidence_top_k: int = 10,
+    duplicate_coverage_weight: float = 0.0,
+    duplicate_coverage_rate: float = 0.10,
+    duplicate_anchor_priority: bool = False,
+    duplicate_force_present: bool = False,
+    requested_scenes: tuple[str, ...] = (),
+    seed_offset: int = 0,
 ) -> None:
     if cross_validated_membership and split != "train":
         raise ValueError("Cross-validated membership is only valid for the train split")
     patterns = load_patterns(root)
     membership_model = None if cross_validated_membership else train_membership_classifier(root)
-    rows = blank_template(root, split)
-    fieldnames = list(rows[0])
-    for scene_index, row in enumerate(rows):
+    all_rows = blank_template(root, split)
+    fieldnames = list(all_rows[0])
+    indexed_rows = list(enumerate(all_rows))
+    if requested_scenes:
+        requested = set(requested_scenes)
+        known = {row["Id"] for row in all_rows}
+        unknown = requested - known
+        if unknown:
+            raise ValueError(f"Unknown {split} scenes: {sorted(unknown)}")
+        indexed_rows = [item for item in indexed_rows if item[1]["Id"] in requested]
+    rows = [row for _, row in indexed_rows]
+    for scene_index, row in indexed_rows:
         scene_membership_model = (
             train_membership_classifier(root, excluded_scene=row["Id"])
             if cross_validated_membership
@@ -1056,7 +1767,8 @@ def write_predictions(
             top_k,
             proposals,
             cache_dir,
-            seed=51_179 + scene_index,
+            dense_cache_dirs,
+            seed=51_179 + scene_index + seed_offset,
             device=device,
             batch_size=batch_size,
             graph_top_k=graph_top_k,
@@ -1069,19 +1781,46 @@ def write_predictions(
             max_graph_queries=max_graph_queries,
             consensus_trials=consensus_trials,
             transform_model=transform_model,
+            proposal_mode=proposal_mode,
+            clutter_trials=clutter_trials,
             final_rank_weight=final_rank_weight,
+            final_query_scope=final_query_scope,
+            pattern_workers=pattern_workers,
+            consensus_selection=consensus_selection,
+            consensus_vote_weight=consensus_vote_weight,
+            patch_budget_weight=patch_budget_weight,
+            patch_budget_center=patch_budget_center,
+            patch_budget_width=patch_budget_width,
+            star_evidence_weight=star_evidence_weight,
+            star_evidence_points=star_evidence_points,
+            star_evidence_tolerance=star_evidence_tolerance,
+            duplicate_evidence_cache_dir=duplicate_evidence_cache_dir,
+            duplicate_evidence_threshold=duplicate_evidence_threshold,
+            duplicate_evidence_top_k=duplicate_evidence_top_k,
+            duplicate_coverage_weight=duplicate_coverage_weight,
+            duplicate_coverage_rate=duplicate_coverage_rate,
+            duplicate_anchor_priority=duplicate_anchor_priority,
+            duplicate_force_present=duplicate_force_present,
         )
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as stream:
         writer = csv.DictWriter(stream, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(rows)
-    if split == "validation":
+    if split == "validation" and not requested_scenes:
         validate_submission(root, output)
+    elif requested_scenes:
+        print(f"partial scene output: {', '.join(row['Id'] for row in rows)}", flush=True)
     print(f"wrote {output}", flush=True)
 
 
 def main() -> None:
+    # The RANSAC scale filter is consulted inside the proposal helpers, which
+    # read these module globals rather than taking them as arguments. Pattern
+    # fitting fans out over a ThreadPoolExecutor, which shares module state, so
+    # rebinding them here reaches every worker.
+    global RANSAC_SCALE_RATIO_MIN, RANSAC_SCALE_RATIO_MAX
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", type=Path, default=Path(__file__).parent)
     parser.add_argument("--config", type=Path, required=True)
@@ -1105,6 +1844,16 @@ def main() -> None:
         ),
     )
     parser.add_argument("--cache-dir", type=Path)
+    parser.add_argument(
+        "--dense-cache-dir",
+        type=Path,
+        nargs="*",
+        default=(),
+        help=(
+            "Additional candidate caches used only for final fixed-transform "
+            "assignment; they never affect RANSAC fitting or identity ranking."
+        ),
+    )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--batch-size", type=int, default=48)
     parser.add_argument("--presence-mode", choices=("threshold", "quantile"), default="quantile")
@@ -1161,6 +1910,106 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--proposal-mode",
+        choices=("pair", "triangle", "hybrid"),
+        default="pair",
+        help=(
+            "RANSAC seed generator. Hybrid spends half the fixed proposal "
+            "budget on invariant triangle matches and preserves the pair baseline."
+        ),
+    )
+    parser.add_argument(
+        "--clutter-trials",
+        type=int,
+        default=0,
+        help=(
+            "Random label-free pattern placements used to calibrate graph "
+            "significance against the scene's actual clustered candidate cloud. "
+            "Zero preserves the established uniform-null baseline."
+        ),
+    )
+    parser.add_argument(
+        "--patch-budget-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of the bounded log prior on total patches per transformed "
+            "in-frame pattern node. Zero preserves established ranking."
+        ),
+    )
+    parser.add_argument(
+        "--patch-budget-center",
+        type=float,
+        default=2.97,
+        help="Expected total-patches / in-frame-nodes ratio.",
+    )
+    parser.add_argument(
+        "--patch-budget-width",
+        type=float,
+        default=0.35,
+        help="Deliberately broad log-space standard deviation for the patch-budget prior.",
+    )
+    parser.add_argument(
+        "--star-evidence-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight of bounded likelihood evidence from detected stars at "
+            "in-frame pattern nodes not already explained by patch assignments."
+        ),
+    )
+    parser.add_argument(
+        "--star-evidence-points",
+        type=int,
+        default=300,
+        help="Number of strongest scene star peaks retained for node evidence.",
+    )
+    parser.add_argument(
+        "--star-evidence-tolerance",
+        type=float,
+        default=20.0,
+        help="Maximum pixel distance between an unmatched node and a detected star.",
+    )
+    parser.add_argument(
+        "--duplicate-evidence-cache-dir",
+        type=Path,
+        help="Candidate cache used only to measure copy-region evidence.",
+    )
+    parser.add_argument(
+        "--duplicate-evidence-threshold",
+        type=float,
+        default=0.95,
+        help="Annulus NCC threshold for a duplicate/copy-evidence patch.",
+    )
+    parser.add_argument(
+        "--duplicate-evidence-top-k",
+        type=int,
+        default=10,
+        help="Candidate regions compared per query for copy evidence.",
+    )
+    parser.add_argument(
+        "--duplicate-coverage-weight",
+        type=float,
+        default=0.0,
+        help="Weight of the bounded duplicate-count likelihood in identity scoring.",
+    )
+    parser.add_argument(
+        "--duplicate-coverage-rate",
+        type=float,
+        default=0.10,
+        help="Expected duplicate-evidence rate per visible figure node.",
+    )
+    parser.add_argument(
+        "--duplicate-anchor-priority",
+        action="store_true",
+        help="Place duplicate-evidence queries first in the RANSAC query shortlist.",
+    )
+    parser.add_argument(
+        "--duplicate-force-present",
+        action="store_true",
+        help="Keep duplicate-evidence queries present without narrowing their candidates.",
+    )
+    parser.add_argument(
         "--cross-validated-membership",
         action="store_true",
         help="For train diagnostics, fit membership on the other scenes for each prediction",
@@ -1170,6 +2019,64 @@ def main() -> None:
         type=float,
         default=0.0,
         help="Optional best-first rank penalty in final dense graph assignment only",
+    )
+    parser.add_argument(
+        "--final-query-scope",
+        choices=("selected", "all"),
+        default="selected",
+        help=(
+            "Queries allowed to compete for nodes after identity and transform "
+            "are fixed. 'all' can rescue dim figure patches excluded from the "
+            "precision-oriented RANSAC shortlist."
+        ),
+    )
+    parser.add_argument(
+        "--pattern-workers",
+        type=int,
+        default=2,
+        help="Pattern hypotheses evaluated concurrently for each RANSAC seed",
+    )
+    parser.add_argument(
+        "--consensus-selection",
+        choices=("plurality", "quality", "vote-quality"),
+        default="plurality",
+        help="How independent RANSAC seeds select the final identity",
+    )
+    parser.add_argument(
+        "--consensus-vote-weight",
+        type=float,
+        default=0.75,
+        help="Per-winning-seed bonus used by vote-quality consensus",
+    )
+    parser.add_argument(
+        "--scene",
+        action="append",
+        default=[],
+        help="Process only this scene; repeat for checkpointable partial runs",
+    )
+    parser.add_argument(
+        "--seed-offset",
+        type=int,
+        default=0,
+        help="Shift every scene's RANSAC seed to test identity stability",
+    )
+    parser.add_argument(
+        "--scale-ratio-min",
+        type=float,
+        default=RANSAC_SCALE_RATIO_MIN,
+        help=(
+            "Lower bound of the search-time diagram-to-sky scale band. All 48 "
+            "supplied diagrams span 353-461 px, so this ratio is comparable "
+            "across diagrams rather than an artefact of one canvas size; the "
+            "three labelled scenes measure 4.42, 4.87 and 6.38. The default "
+            "band is deliberately permissive and admits many spurious fits."
+        ),
+    )
+    parser.add_argument(
+        "--scale-ratio-max",
+        type=float,
+        default=RANSAC_SCALE_RATIO_MAX,
+        help="Upper bound of the search-time diagram-to-sky scale band",
     )
     args = parser.parse_args()
     if args.top_k < 2:
@@ -1184,6 +2091,34 @@ def main() -> None:
         parser.error("--cross-validated-membership requires --split train")
     if args.final_rank_weight < 0.0:
         parser.error("--final-rank-weight must be nonnegative")
+    if args.pattern_workers < 1:
+        parser.error("--pattern-workers must be positive")
+    if args.consensus_vote_weight < 0.0:
+        parser.error("--consensus-vote-weight must be nonnegative")
+    if args.clutter_trials < 0:
+        parser.error("--clutter-trials must be nonnegative")
+    if args.patch_budget_weight < 0.0:
+        parser.error("--patch-budget-weight must be nonnegative")
+    if args.patch_budget_center <= 0.0 or args.patch_budget_width <= 0.0:
+        parser.error("--patch-budget-center and --patch-budget-width must be positive")
+    if args.star_evidence_weight < 0.0:
+        parser.error("--star-evidence-weight must be nonnegative")
+    if args.star_evidence_points < 1 or args.star_evidence_tolerance <= 0.0:
+        parser.error("--star-evidence-points and --star-evidence-tolerance must be positive")
+    if not -1.0 <= args.duplicate_evidence_threshold <= 1.0:
+        parser.error("--duplicate-evidence-threshold must be between -1 and 1")
+    if args.duplicate_evidence_top_k < 2:
+        parser.error("--duplicate-evidence-top-k must be at least 2")
+    if args.duplicate_coverage_weight < 0.0:
+        parser.error("--duplicate-coverage-weight must be nonnegative")
+    if not 0.0 < args.duplicate_coverage_rate < 1.0:
+        parser.error("--duplicate-coverage-rate must be between 0 and 1")
+    if args.scale_ratio_min <= 0.0:
+        parser.error("--scale-ratio-min must be positive")
+    if args.scale_ratio_max <= args.scale_ratio_min:
+        parser.error("--scale-ratio-max must exceed --scale-ratio-min")
+    RANSAC_SCALE_RATIO_MIN = args.scale_ratio_min
+    RANSAC_SCALE_RATIO_MAX = args.scale_ratio_max
     root = args.root.resolve()
     write_predictions(
         root,
@@ -1193,6 +2128,7 @@ def main() -> None:
         args.top_k,
         args.proposals,
         args.cache_dir.resolve() if args.cache_dir else None,
+        tuple(path.resolve() for path in args.dense_cache_dir),
         args.device,
         args.batch_size,
         args.graph_top_k,
@@ -1207,6 +2143,28 @@ def main() -> None:
         args.transform_model,
         args.cross_validated_membership,
         args.final_rank_weight,
+        args.final_query_scope,
+        args.pattern_workers,
+        args.consensus_selection,
+        args.consensus_vote_weight,
+        args.proposal_mode,
+        args.clutter_trials,
+        args.patch_budget_weight,
+        args.patch_budget_center,
+        args.patch_budget_width,
+        args.star_evidence_weight,
+        args.star_evidence_points,
+        args.star_evidence_tolerance,
+        args.duplicate_evidence_cache_dir.resolve()
+        if args.duplicate_evidence_cache_dir else None,
+        args.duplicate_evidence_threshold,
+        args.duplicate_evidence_top_k,
+        args.duplicate_coverage_weight,
+        args.duplicate_coverage_rate,
+        args.duplicate_anchor_priority,
+        args.duplicate_force_present,
+        tuple(args.scene),
+        args.seed_offset,
     )
 
 

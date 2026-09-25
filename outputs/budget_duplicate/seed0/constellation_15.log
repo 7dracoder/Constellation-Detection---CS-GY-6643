@@ -1,0 +1,4 @@
+membership calibration: n=71 macro-F1=0.910 threshold=0.503
+constellation_15: pisces support=7 assigned=7 error=10.1 cov=0.39 sig=8.9 q=7.09 nodes=18 pb=-0.27 dup=3 dup-ll=-1.78 stars=0/0 star-llr=0.00 present=43/69 queries=30 final-queries=selected votes=2/3 cloud=90 runner=hydra runner-q=7.31 margin=-0.22
+partial scene output: constellation_15
+wrote /mnt/c/Users/subhr/Documents/GitHub/Constellation-Detection---CS-GY-6643/outputs/budget_duplicate/seed0/constellation_15.csv.tmp

@@ -33,6 +33,33 @@ class FixedNodeOwnershipTests(unittest.TestCase):
     def test_missing_view_is_not_rank_one(self) -> None:
         self.assertGreater(rank_cost(0, 24), rank_cost(1, 24))
 
+    def test_present_nonmember_can_take_fixed_node_without_changing_node_set(self) -> None:
+        row = {
+            "Id": "scene",
+            "n_patches": "3",
+            "patch_01": "(100, 100, 1)",
+            "patch_02": "(200, 200, 1)",
+            "patch_03": "(300, 300, 0)",
+            "constellation": "orion",
+        }
+        raw = [
+            [[100, 100, 0.8]],
+            [[200, 200, 0.8]],
+            [[200, 200, 0.95], [300, 300, 0.8]],
+        ]
+        gaussian = [
+            [[100, 100, 0.8]],
+            [[500, 500, 0.8]],
+            [[200, 200, 0.95], [300, 300, 0.8]],
+        ]
+        refined, changed, gain = refine_row(
+            row, raw, gaussian, query_scope="present"
+        )
+        self.assertGreater(gain, 0.0)
+        self.assertEqual(changed, 2)
+        self.assertEqual(refined["patch_02"], "(200, 200, 0)")
+        self.assertEqual(refined["patch_03"], "(200, 200, 1)")
+
 
 if __name__ == "__main__":
     unittest.main()
